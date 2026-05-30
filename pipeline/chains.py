@@ -7,6 +7,7 @@ Writer and Critic LangChain chains with:
 """
 
 import logging
+import re
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -23,13 +24,14 @@ fact-checked, so precision is critical.
 
 STRICT RULES:
 1. ONLY use facts from the provided sources below. Never invent data.
-2. If a fact is not in the provided context, write "Not found in sources."
+2. If a fact is not in the provided context, omit that claim or subsection entirely.
 3. ONLY cite URLs from the verified_urls list — never modify or create URLs.
 4. Every claim must have a [Source N] citation.
 5. If sources conflict, mention both and prefer the most recent one.
 6. Use clear, professional language. Avoid filler phrases.
 7. Do NOT include any horizontal rules (---) between sections.
-8. Do NOT append any conversational preamble, postamble, JSON summary, or extra text at the end. Your report must end strictly with the Conclusion or Sources section.""",
+8. Never write placeholders such as "Not found in sources", "Removed due to lack of source evidence", or "[UNVERIFIED]".
+9. Do NOT append any conversational preamble, postamble, JSON summary, or extra text at the end. Your report must end strictly with the Conclusion or Sources section.""",
         ),
         (
             "human",
@@ -60,7 +62,7 @@ Output format:
 ## Conclusion
 ## Sources
 
-Strict Formatting Note: Do NOT add any extra markdown dividers (---), JSON summaries, or other text after the Sources section.""",
+Strict Formatting Note: Do NOT add any extra markdown dividers (---), JSON summaries, unsupported-claim placeholders, or other text after the Sources section.""",
         ),
     ]
 )
@@ -112,6 +114,35 @@ def build_critic_chain(llm):
 
 # ── Node runners ──────────────────────────────────────────────────────────────
 
+def sanitize_final_report(report: str) -> str:
+    """Remove internal LLM artifacts that should never reach the final report."""
+    if not report:
+        return ""
+
+    cleaned = re.split(r"\n\s*(?:JSON Summary|JSON\s*:)\s*\n", report, flags=re.IGNORECASE)[0]
+    cleaned = re.sub(r"```json\s*\{.*?\}\s*```", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"^\s*---+\s*$", "", cleaned, flags=re.MULTILINE)
+
+    output = []
+    artifact_patterns = (
+        "removed due to lack of source evidence",
+        "not found in sources",
+        "[unverified]",
+    )
+
+    for line in cleaned.splitlines():
+        lowered = line.lower()
+        if any(pattern in lowered for pattern in artifact_patterns):
+            if output and re.match(r"^\s*#{2,6}\s+", output[-1]):
+                output.pop()
+            continue
+        output.append(line)
+
+    cleaned = "\n".join(output)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
+
+
 def run_writer(state: dict, chain) -> dict:
     if state.get("error") and not state.get("scraped_content"):
         return {**state, "report": "", "critique": ""}
@@ -145,6 +176,7 @@ def run_writer(state: dict, chain) -> dict:
                 "verified_urls": verified_url_text or "- None",
             }
         )
+        report = sanitize_final_report(report)
         log.info("Writer: report generated (%d chars)", len(report))
         return {**state, "report": report}
 
@@ -186,7 +218,7 @@ def run_writer_streaming(state: dict, chain, result_holder: dict = None):
         yield chunk
 
     if result_holder is not None:
-        result_holder["report"] = full_report
+        result_holder["report"] = sanitize_final_report(full_report)
 
 
 def run_critic(state: dict, chain) -> dict:
