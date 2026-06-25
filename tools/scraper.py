@@ -98,7 +98,7 @@ def scrape_many_parallel(urls: List[str], max_workers: int = 6) -> Dict[str, str
         for future in as_completed(future_to_url):
             url = future_to_url[future]
             try:
-                results[url] = future.result()
+                results[url] = future.result(timeout=15)
             except Exception as exc:
                 results[url] = f"ERROR scraping {url}: {exc}"
 

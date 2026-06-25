@@ -5,6 +5,7 @@ from tools import tavily_search_tool, extract_urls_from_search_output
 
 log = logging.getLogger(__name__)
 
+
 def build_search_agent(llm):
     return create_react_agent(
         model=llm,
@@ -15,6 +16,7 @@ def build_search_agent(llm):
             "Return raw results with title, URL, and snippet."
         ),
     )
+
 
 def run_search_agent(state: dict, agent) -> dict:
     topic = state.get("topic", "").strip()
@@ -30,15 +32,12 @@ def run_search_agent(state: dict, agent) -> dict:
             }
         )
 
-     
         verified_urls = []
         for msg in result["messages"]:
-          
             if hasattr(msg, "tool_calls") or msg.__class__.__name__ == "ToolMessage":
                 raw = getattr(msg, "content", "")
                 try:
                     tool_data = json.loads(raw)
-              
                     if isinstance(tool_data, list):
                         for item in tool_data:
                             if isinstance(item, dict) and "url" in item:
@@ -46,7 +45,6 @@ def run_search_agent(state: dict, agent) -> dict:
                 except (json.JSONDecodeError, TypeError):
                     pass  
 
-      
         messages = result.get("messages", [])
         if not messages:
             log.warning("No messages returned from search agent")

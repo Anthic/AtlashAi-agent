@@ -62,12 +62,12 @@ log = logging.getLogger(__name__)
  
 # ── Score parser ──────────────────────────────────────────────────────────────
  
+_RE_SCORE = re.compile(
+    r"score\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*/\s*10",
+    re.IGNORECASE,
+)
 def parse_score(critique: str) -> int:
-    match = re.search(
-        r"score\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*/\s*10",
-        critique or "",
-        flags=re.IGNORECASE,
-    )
+    match = _RE_SCORE.search(critique or "")
     if not match:
         return 0
     return max(0, min(10, round(float(match.group(1)))))
@@ -86,9 +86,13 @@ def route_after_critic(state: ResearchState) -> str:
     score    = state.get("critique_score", 0)
     retries  = state.get("retry_count", 0)
     max_ret  = state.get("max_retries", 1)
- 
-    if score >= 8:
-        log.info("Router → END  (score=%d)", score)
+
+    mode = state.get("mode", "deep")
+    threshold = 5 if mode == "fast" else 8
+    max_ret = 0 if mode == "fast" else max_ret
+
+    if score >= threshold:
+        log.info("Router → END  (score=%d, threshold=%d)", score, threshold)
         return "end"
     if retries < max_ret:
         log.info("Router → REWRITE  (score=%d, retry %d/%d)", score, retries + 1, max_ret)
@@ -143,7 +147,7 @@ def run_writer_node(state: dict, writer_chain) -> dict:
  
 # ── Pipeline builder ──────────────────────────────────────────────────────────
  
-def build_pipeline():
+def build_pipeline(mode: str = "deep"):
     fast_llm  = get_llm("fast")
     smart_llm = get_llm("smart")
  
@@ -182,31 +186,38 @@ def build_pipeline():
     graph.add_node("critic",
         lambda s: run_critic_node(s, critic_chain))
     
-    graph.add_node("knowledge_graph",
-        lambda s: run_knowledge_graph_node(s, smart_llm))
+    if mode != "fast":
+        graph.add_node("knowledge_graph",
+            lambda s: run_knowledge_graph_node(s, smart_llm))
 
     graph.add_node("prepare_rewrite", bump_retry)
  
     # ── Edges ──────────────────────────────────────────────────────────────
     graph.add_edge(START,            "planner")    
     graph.add_edge("planner",        "searcher")   
-    graph.add_edge("searcher",       "reader")
-    graph.add_edge("reader",         "summarize")
-    graph.add_edge("summarize",      "rag")
-    graph.add_edge("rag",            "writer")
-    graph.add_edge("writer",         "fact_check")
-    graph.add_edge("fact_check",     "critic")
 
-    # ── Conditional rewrite loop ───────────────────────────────────────────
-    graph.add_conditional_edges(
-        "critic",
-        route_after_critic,
-        {
-            "rewrite": "prepare_rewrite",
-            "end":     "knowledge_graph",
-        },
-    )
-    graph.add_edge("prepare_rewrite", "writer")
-    graph.add_edge("knowledge_graph", END) 
+    if mode == "fast":
+        graph.add_edge("searcher",   "writer")
+        graph.add_edge("writer",     END)
+    else:
+        graph.add_edge("searcher",       "reader")
+        graph.add_edge("reader",         "summarize")
+        graph.add_edge("summarize",      "rag")
+        graph.add_edge("rag",            "writer")
+        graph.add_edge("writer",         "fact_check")
+        graph.add_edge("fact_check",     "critic")
+
+        # ── Conditional rewrite loop ───────────────────────────────────────────
+        graph.add_conditional_edges(
+            "critic",
+            route_after_critic,
+            {
+                "rewrite": "prepare_rewrite",
+                "end":     "knowledge_graph",
+            },
+        )
+        graph.add_edge("prepare_rewrite", "writer")
+        graph.add_edge("knowledge_graph", END)
  
     return graph.compile()
+ 

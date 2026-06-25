@@ -228,6 +228,7 @@ async def _async_run_rag(state: Dict) -> Dict:
 
 
 # ── Main Node Signature (Synchronous wrapper) ───────────────────────────
+# ── Main Node Signature (Synchronous wrapper) ───────────────────────────
 
 def run_rag_node(state: Dict) -> Dict:
     """
@@ -237,8 +238,4 @@ def run_rag_node(state: Dict) -> Dict:
     Uses BAAI/bge-small-en-v1.5 locally via fastembed and gathers
     chunk + query embedding in parallel.
     """
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(_async_run_rag(state))
-    finally:
-        loop.close()
+    return asyncio.run(_async_run_rag(state))

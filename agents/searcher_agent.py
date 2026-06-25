@@ -1,20 +1,20 @@
 import logging
 from typing import Dict, List
-
-from agents.search_agent import run_search_agent  # module-level so tests can patch it
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tools import tavily_search_tool
+from tools.cache_tool import cached_search
 
 log = logging.getLogger(__name__)
+
+MAX_PARALLEL_WORKERS = 8
 
 
 def run_searcher_node(state: dict, search_agent) -> dict:
     """
     LangGraph node — searches for every query from the planner.
-
-    Falls back to the single-query path (search_topic / topic) if
-    search_queries is empty so the pipeline stays backward-compatible.
+    Runs queries in parallel using ThreadPoolExecutor and direct Tavily calls,
+    integrated with Upstash Redis caching.
     """
-    # run_search_agent imported at module level above
-
     queries: List[str] = state.get("search_queries", [])
 
     # ── Fallback to legacy single query ──────────────────────────────────
@@ -36,24 +36,60 @@ def run_searcher_node(state: dict, search_agent) -> dict:
     all_urls: List[str] = []
     seen_urls: set = set()
 
-    for i, query in enumerate(queries):
-        log.info("SearcherAgent: running query %d/%d — %r", i + 1, len(queries), query)
+    def _run_one(query: str, idx: int) -> tuple:
+        log.info("SearcherAgent: running query %d/%d — %r", idx + 1, len(queries), query)
+        
+        # Direct Tavily Search function to pass to cached_search
+        def _search(q: str) -> dict:
+            try:
+                # Direct Tavily call bypassing the ReAct LLM agent
+                return tavily_search_tool.invoke(q)
+            except Exception as e:
+                log.error("Tavily search failed for query %r: %s", q, e)
+                return {"results": []}
 
+        # Use Upstash Redis cached search
+        res = cached_search(query, _search, ttl=3600)
+        
+        results = res.get("results", []) if isinstance(res, dict) else []
+        
+        snippets = []
+        local_urls = []
+        for item in results:
+            url = item.get("url", "")
+            title = item.get("title", "")
+            content = item.get("content", "")
+            if url:
+                local_urls.append(url)
+            snippets.append(f"Title: {title}\nURL: {url}\nSnippet: {content}")
+        
+        snippet_text = "\n".join(snippets)
+        return idx, snippet_text, local_urls
 
-        patched_state = {
-            **state,
-            "topic": query,           
-            "search_results": [],
-            "verified_urls": [],
-            "urls": [],
+    worker_count = min(len(queries), MAX_PARALLEL_WORKERS)
+    results = [None] * len(queries)
+
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = {
+            pool.submit(_run_one, q, i): i
+            for i, q in enumerate(queries)
         }
-        result = run_search_agent(patched_state, search_agent)
+        for future in as_completed(futures):
+            try:
+                idx, snippet, urls = future.result(timeout=60)
+                results[idx] = (snippet, urls)
+            except Exception as exc:
+                i = futures[future]
+                log.warning("SearcherAgent: query %d failed — %s", i, exc)
+                results[i] = ("", [])
 
-        snippet = result.get("search_results", "").strip()
+    for i, res in enumerate(results):
+        if res is None:
+            continue
+        snippet, urls = res
         if snippet:
-            all_snippets.append(f"[Query {i+1}: {query}]\n{snippet}")
-
-        for url in result.get("verified_urls", []) + result.get("urls", []):
+            all_snippets.append(f"[Query {i+1}: {queries[i]}]\n{snippet}")
+        for url in urls:
             if url and url not in seen_urls:
                 seen_urls.add(url)
                 all_urls.append(url)
@@ -68,6 +104,6 @@ def run_searcher_node(state: dict, search_agent) -> dict:
         **state,
         "search_results": [combined_results],
         "verified_urls": all_urls,
-        "urls": list(all_urls),  # separate copy to avoid shared reference
+        "urls": list(all_urls),
         "topic": state.get("topic", ""),
     }

@@ -39,17 +39,20 @@ def _sep(char: str = "─", width: int = 64) -> str:
 
 # ── Streaming writer ──────────────────────────────────────────────────────────
 
-def _run_streaming(topic: str) -> dict:
+def _run_streaming(topic: str, mode: str = "deep") -> dict:
     """Run the pipeline and stream the writer output token-by-token."""
     from pipeline.model import get_llm
     from pipeline.chains import build_writer_chain, run_writer_streaming
     from pipeline import run_research  # for non-writer nodes
 
     print(_c(CYAN, f"\n🔍 Rewriting query for: {topic!r}"))
-    print(_c(CYAN, "🌐 Searching + scraping (this may take 20-40 s)...\n"))
+    if mode == "fast":
+        print(_c(CYAN, "🌐 Parallel search (fast mode)...\n"))
+    else:
+        print(_c(CYAN, "🌐 Searching + scraping (this may take 20-40 s)...\n"))
 
     # Run pipeline normally (all nodes except streaming writer)
-    result = run_research(topic)
+    result = run_research(topic, mode=mode)
 
     # The report was already generated; stream it character-by-character
     # so the user sees output appear live instead of waiting for the whole block
@@ -170,6 +173,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Stream report output character-by-character.",
     )
     p.add_argument(
+        "--fast",
+        action="store_true",
+        default=False,
+        help="Run in fast mode (skip scraping, RAG, fact-check, and critic).",
+    )
+    p.add_argument(
         "--history",
         action="store_true",
         default=False,
@@ -207,16 +216,17 @@ def main() -> None:
         topic = "Latest advances in quantum computing 2024"
         print(_c(DIM, f"  Using default topic: {topic}"))
 
-    print(_c(DIM, f"\n  Starting research pipeline for: {topic!r}\n"))
+    mode = "fast" if args.fast else "deep"
+    print(_c(DIM, f"\n  Starting research pipeline ({mode} mode) for: {topic!r}\n"))
 
     # ── run ───────────────────────────────────────────────────────────────
     try:
         if args.stream:
-            result = _run_streaming(topic)
+            result = _run_streaming(topic, mode=mode)
             _print_result(result, streaming=True)
         else:
             from pipeline import run_research
-            result = run_research(topic)
+            result = run_research(topic, mode=mode)
             _print_result(result, streaming=False)
 
     except KeyboardInterrupt:

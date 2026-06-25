@@ -13,6 +13,11 @@ from langchain_core.output_parsers import StrOutputParser
 
 log = logging.getLogger(__name__)
 
+_RE_JSON_SPLIT = re.compile(r"\n\s*(?:JSON Summary|JSON\s*:)\s*\n", re.IGNORECASE)
+_RE_JSON_BLOCK = re.compile(r"```json\s*\{.*?\}\s*```", re.IGNORECASE | re.DOTALL)
+_RE_HLINE      = re.compile(r"^\s*---+\s*$", re.MULTILINE)
+_RE_HEADING    = re.compile(r"^\s*#{2,6}\s+")
+_RE_EXCESS_NL  = re.compile(r"\n{3,}")
 # ── Writer ────────────────────────────────────────────────────────────────────
 
 _writer_prompt = ChatPromptTemplate.from_messages(
@@ -115,33 +120,27 @@ def build_critic_chain(llm):
 # ── Node runners ──────────────────────────────────────────────────────────────
 
 def sanitize_final_report(report: str) -> str:
-    """Remove internal LLM artifacts that should never reach the final report."""
     if not report:
         return ""
-
-    cleaned = re.split(r"\n\s*(?:JSON Summary|JSON\s*:)\s*\n", report, flags=re.IGNORECASE)[0]
-    cleaned = re.sub(r"```json\s*\{.*?\}\s*```", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"^\s*---+\s*$", "", cleaned, flags=re.MULTILINE)
-
+    cleaned = _RE_JSON_SPLIT.split(report)[0]
+    cleaned = _RE_JSON_BLOCK.sub("", cleaned)
+    cleaned = _RE_HLINE.sub("", cleaned)
     output = []
     artifact_patterns = (
         "removed due to lack of source evidence",
         "not found in sources",
         "[unverified]",
     )
-
     for line in cleaned.splitlines():
         lowered = line.lower()
         if any(pattern in lowered for pattern in artifact_patterns):
-            if output and re.match(r"^\s*#{2,6}\s+", output[-1]):
+            if output and _RE_HEADING.match(output[-1]):
                 output.pop()
             continue
         output.append(line)
-
     cleaned = "\n".join(output)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    cleaned = _RE_EXCESS_NL.sub("\n\n", cleaned).strip()
     return cleaned
-
 
 def run_writer(state: dict, chain) -> dict:
     if state.get("error") and not state.get("scraped_content"):

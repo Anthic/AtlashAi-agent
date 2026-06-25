@@ -121,7 +121,7 @@ _jobs = JobStore()
 class ResearchRequest(BaseModel):
     topic: str = Field(..., min_length=3, max_length=500)
     user_id: Optional[str] = None
-
+    mode: str = Field(default="deep", pattern=r"^(fast|deep)$")
 
 class SaveHistoryRequest(BaseModel):
     job_id: str
@@ -150,7 +150,7 @@ class JobResponse(BaseModel):
 
 
 
-def _run_pipeline_background(job_id: str, topic: str, user_id: Optional[str] = None) -> None:
+def _run_pipeline_background(job_id: str, topic: str, user_id: Optional[str] = None, mode: str = "deep") -> None:
     """
     Runs in a daemon thread.
     Updates job store at each stage so the polling endpoint reflects progress.
@@ -164,7 +164,7 @@ def _run_pipeline_background(job_id: str, topic: str, user_id: Optional[str] = N
         final_result = {}
 
         # Capture real events from LangGraph
-        for event in run_research_stream(topic, job_id=job_id):
+        for event in run_research_stream(topic, job_id=job_id, mode=mode):
             if "__done__" in event:
                 final_result = event["__done__"]
                 continue
@@ -294,7 +294,7 @@ async def start_research(req: ResearchRequest):
     # Fire background thread
     t = threading.Thread(
         target=_run_pipeline_background,
-        args=(job_id, req.topic, req.user_id),
+        args=(job_id, req.topic, req.user_id, req.mode),
         daemon=True,
     )
     t.start()

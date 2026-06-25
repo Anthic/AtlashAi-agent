@@ -9,19 +9,21 @@ import time
 from typing import Generator
 from .runner import build_pipeline
 
-_compiled_pipeline = None
+_pipeline_cache : dict = {}
 
 
-def _get_pipeline():
-    global _compiled_pipeline
-    if _compiled_pipeline is None:
-        _compiled_pipeline = build_pipeline()
-    return _compiled_pipeline
+def _get_pipeline(mode: str = "deep"):
+    if mode not in _pipeline_cache:
+        _pipeline_cache[mode] = build_pipeline(mode=mode)
+    return _pipeline_cache[mode]
 
 
-def _make_initial_state(topic: str) -> dict:
+
+
+def _make_initial_state(topic: str , mode : str = "deep") -> dict:
     return {
         "topic": topic,
+        "mode" : mode,
         # Planner output
         "plan": "",
         "sub_questions": [],
@@ -53,7 +55,7 @@ def _make_initial_state(topic: str) -> dict:
 
 
 # ── Streaming generator (new) ────────────────────────────────────────────
-def stream_research(topic: str, job_id: str | None = None) -> Generator[dict, None, None]:
+def stream_research(topic: str, job_id: str | None = None, mode: str = "deep") -> Generator[dict, None, None]:
     """
     Yields an event after each node finishes in LangGraph.
 
@@ -61,8 +63,8 @@ def stream_research(topic: str, job_id: str | None = None) -> Generator[dict, No
       {"node_name": {"changed_key": value, ...}}   
       {"__done__": {...full result...}}            
     """
-    pipeline = _get_pipeline()
-    initial_state = _make_initial_state(topic)
+    pipeline = _get_pipeline(mode=mode)
+    initial_state = _make_initial_state(topic ,mode=mode)
 
     start = time.time()
     final_state = {}
@@ -95,14 +97,14 @@ def stream_research(topic: str, job_id: str | None = None) -> Generator[dict, No
 
 
 # ── Blocking version — old interface unchanged ─────────────────────────────
-def run_research(topic: str, job_id: str | None = None) -> dict:
+def run_research(topic: str, job_id: str | None = None, mode: str = "deep") -> dict:
     """
     Consumes stream_research() and returns a single dict.
     No changes needed in old code that calls run_research().
     """
     result = {}
 
-    for event in stream_research(topic, job_id):
+    for event in stream_research(topic, job_id, mode=mode):
         if "__done__" in event:
             result = event["__done__"]
 
