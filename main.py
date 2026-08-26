@@ -46,8 +46,7 @@ def _sep(char: str = "─", width: int = 64) -> str:
 
 def _run_streaming(topic: str, mode: str = "deep") -> dict:
     """Run the pipeline and stream the writer output token-by-token."""
-    from pipeline.model import get_llm
-    from pipeline.chains import build_writer_chain, run_writer_streaming
+
     from pipeline import run_research  # for non-writer nodes
 
     print(_c(CYAN, f"\n🔍 Rewriting query for: {topic!r}"))

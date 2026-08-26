@@ -424,6 +424,53 @@ async def get_cache_stats():
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+
+# ── Phase 2: Paraphraser Endpoint ─────────────────────────────────────────────
+
+class ParaphraseRequest(BaseModel) : 
+    text : str = Field(..., min_length=10, max_length=5000)
+    mode : str = Field(
+        default="academic",
+        pattern=r"^(academic|simplify|executive|humanize)$",
+        
+    )
+    user_id : Optional[str] = None
+
+class ParaphraseResponse(BaseModel) :
+    paraphrased_text: str
+    mode: str
+    provider_used: str
+    duration_sec: float
+    token_usage: dict
+
+@app.post("/api/v1/paraphrase", response_model=ParaphraseResponse, tags=["Phase 2: Paper Studio"])
+def paraphrase_text(req: ParaphraseRequest):
+    """
+    AI Paraphraser — 4 modes:
+      • academic   → Journal-quality formal rewrite
+      • simplify   → ELI15 plain language
+      • executive  → 3-bullet point summary
+      • humanize   → Remove AI-sounding patterns
+    """
+    try:
+        from agents.paraphraser_agent import paraphrase
+        result = paraphrase(text=req.text, mode=req.mode)
+        return ParaphraseResponse(
+            paraphrased_text=result.content,
+            mode=req.mode,
+            provider_used=result.provider_used,
+            duration_sec=result.duration_sec,
+            token_usage=result.token_usage,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=f"All AI providers failed: {exc}")
+    except Exception as exc:
+        log.exception("Unexpected error in /paraphrase")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -439,3 +486,5 @@ if __name__ == "__main__":
         reload=False,    # reload=True requires running via uvicorn CLI
         log_level="info",
     )
+
+

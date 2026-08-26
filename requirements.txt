@@ -7,17 +7,20 @@ langchain
 langchain-core
 langchain-community
 
-# --- Mistral AI (LLM + Embeddings) ---
-mistralai
-langchain-mistralai
-
 # --- LangGraph ---
 langgraph
+
+# --- LLM Providers ---
+mistralai
+langchain-mistralai
+langchain-groq
+langchain-google-genai
+langchain-openai
 
 # --- Vector Store: Qdrant Cloud ---
 qdrant-client
 langchain-qdrant
-fastembed>=0.2.0
+fastembed
 
 # --- History DB: Supabase PostgreSQL ---
 psycopg2-binary
