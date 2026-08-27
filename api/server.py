@@ -1,29 +1,4 @@
-"""
-api/server.py
-────────────────────────────────────────────────────────────
-Production FastAPI server with Async Job Queue pattern.
 
-WHY JOB QUEUE?
-  The research pipeline takes 90-120 seconds.
-  HTTP timeout on most platforms = 30-60s.
-  Solution: POST /research → returns {job_id} immediately,
-            client polls GET /job/{id} until done.
-
-FLOW:
-  1. POST /research {"topic":"..."}
-        → creates job in Redis
-        → starts background thread
-        → returns {"job_id": "abc123", "status": "queued"}
-
-  2. GET /job/{job_id}
-        → returns {status: "running"|"done"|"failed", progress: X%, result: ...}
-
-  3. GET /stream/{job_id}   (Server-Sent Events)
-        → streams progress events as they happen
-
-Run locally:
-  uvicorn api.server:app --reload --port 8000
-"""
 
 import asyncio
 import json
@@ -143,6 +118,54 @@ class JobResponse(BaseModel):
     result: Optional[dict] = None
     error: Optional[str] = None
     created_at: float = 0.0
+
+class ParaphraseRequest(BaseModel) : 
+    text : str = Field(..., min_length=10, max_length=5000)
+    mode : str = Field(
+        default="academic",
+        pattern=r"^(academic|simplify|executive|humanize)$",
+        
+    )
+    user_id : Optional[str] = None
+
+class ParaphraseResponse(BaseModel) :
+    paraphrased_text: str
+    mode: str
+    provider_used: str
+    duration_sec: float
+    token_usage: dict
+
+
+
+class VaultSyncRequest(BaseModel):
+    note_id: str
+    user_id: str
+    title: str
+    content: str
+    tags: Optional[list] = []
+    source_url: Optional[str] = None
+class DraftSectionRequest(BaseModel):
+    user_id: str
+    section_topic: str = Field(..., min_length=3)
+    instructions: Optional[str] = "Draft a comprehensive academic section."
+
+
+class GapFinderRequest(BaseModel):
+    topic: str = Field(..., min_length=3, max_length=1000)
+    literature_context: Optional[str] = None
+    user_id: Optional[str] = None
+
+class PeerReviewRequest(BaseModel):
+    title: str = Field(..., min_length=3, max_length=500)
+    content: str = Field(..., min_length=20)
+    user_id: Optional[str] = None
+
+class SlideDeckRequest(BaseModel):
+    title: str = Field(..., min_length=3, max_length=500)
+    content: Optional[str] = None
+    num_slides: Optional[int] = Field(default=8, ge=5, le=15)
+    user_id: Optional[str] = None
+
 
 
 # ── Background runner ──────────────────────────────────────────────────────────
@@ -427,21 +450,7 @@ async def get_cache_stats():
 
 # ── Phase 2: Paraphraser Endpoint ─────────────────────────────────────────────
 
-class ParaphraseRequest(BaseModel) : 
-    text : str = Field(..., min_length=10, max_length=5000)
-    mode : str = Field(
-        default="academic",
-        pattern=r"^(academic|simplify|executive|humanize)$",
-        
-    )
-    user_id : Optional[str] = None
 
-class ParaphraseResponse(BaseModel) :
-    paraphrased_text: str
-    mode: str
-    provider_used: str
-    duration_sec: float
-    token_usage: dict
 
 @app.post("/api/v1/paraphrase", response_model=ParaphraseResponse, tags=["Phase 2: Paper Studio"])
 def paraphrase_text(req: ParaphraseRequest):
@@ -469,6 +478,135 @@ def paraphrase_text(req: ParaphraseRequest):
     except Exception as exc:
         log.exception("Unexpected error in /paraphrase")
         raise HTTPException(status_code=500, detail=str(exc))
+
+# ── Phase 2: Smart Notes Vault & Section Drafter ───────────────────────────────
+
+
+@app.post("/api/v1/vault/sync", tags=["Phase 2: Paper Studio"])
+async def sync_note(req: VaultSyncRequest):
+    """Sync a note to Qdrant vector vault for RAG."""
+    try:
+        from agents.note_vault_agent import sync_note_to_vault
+        point_id = await sync_note_to_vault(
+            note_id=req.note_id,
+            user_id=req.user_id,
+            title=req.title,
+            content=req.content,
+            tags=req.tags,
+            source_url=req.source_url,
+        )
+        return {"success": True, "embedding_id": point_id}
+    except Exception as exc:
+        log.exception("Error syncing note to vault")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/v1/vault/draft-section", tags=["Phase 2: Paper Studio"])
+async def draft_section(req: DraftSectionRequest):
+    """RAG-powered paper section drafter using user's saved notes."""
+    try:
+        from agents.note_vault_agent import search_vault_notes, draft_paper_section_with_notes
+        notes = await search_vault_notes(user_id=req.user_id, query=req.section_topic, limit=4)
+        result = draft_paper_section_with_notes(
+            user_id=req.user_id,
+            section_topic=req.section_topic,
+            instructions=req.instructions,
+            retrieved_notes=notes,
+        )
+        return {
+            "draft_markdown": result.content,
+            "notes_referenced": len(notes),
+            "provider_used": result.provider_used,
+            "duration_sec": result.duration_sec,
+            "token_usage": result.token_usage,
+        }
+    except Exception as exc:
+        log.exception("Error drafting paper section")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Phase 3: Literature Matrix & Gap Finder ────────────────────────────────────
+
+
+@app.post("/api/v1/academic/gap-finder", tags=["Phase 3: Academic AI"])
+def find_research_gaps(req: GapFinderRequest):
+    """
+    Analyzes a topic/literature to construct:
+      1. Literature Comparison Matrix (Markdown Table)
+      2. Unresolved Research Gaps
+      3. Novel Research Proposals
+    """
+    try:
+        from agents.gap_finder_agent import analyze_research_gaps
+        result = analyze_research_gaps(
+            topic=req.topic,
+            literature_context=req.literature_context,
+        )
+        return {
+            "topic": req.topic,
+            "gap_analysis_markdown": result.content,
+            "provider_used": result.provider_used,
+            "duration_sec": result.duration_sec,
+            "token_usage": result.token_usage,
+        }
+    except Exception as exc:
+        log.exception("Error analyzing research gaps")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Phase 3: Simulated 3-Agent Peer-Review Panel ───────────────────────────────
+
+
+@app.post("/api/v1/academic/peer-review", tags=["Phase 3: Academic AI"])
+def peer_review_paper(req: PeerReviewRequest):
+    """
+    Simulates a 3-agent peer review panel:
+      • Reviewer 1: Methodology Critic
+      • Reviewer 2: Domain & Novelty Scholar
+      • Reviewer 3: Clarity & Overclaiming Auditor
+    """
+    try:
+        from agents.peer_review_agent import review_paper_draft
+        result = review_paper_draft(
+            paper_title=req.title,
+            paper_content=req.content,
+        )
+        return {
+            "title": req.title,
+            "review_markdown": result.content,
+            "provider_used": result.provider_used,
+            "duration_sec": result.duration_sec,
+            "token_usage": result.token_usage,
+        }
+    except Exception as exc:
+        log.exception("Error running peer review")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+
+@app.post("/api/v1/academic/generate-slides", tags=["Phase 3: Academic AI"])
+def create_slide_deck(req: SlideDeckRequest):
+    """
+    Transforms research text or topic into an 8-10 slide Marp Markdown Presentation.
+    """
+    try:
+        from agents.slide_generator_agent import generate_slide_deck
+        result = generate_slide_deck(
+            title_or_topic=req.title,
+            content=req.content,
+            num_slides=req.num_slides or 8,
+        )
+        return {
+            "title": req.title,
+            "marp_slides_markdown": result.content,
+            "provider_used": result.provider_used,
+            "duration_sec": result.duration_sec,
+            "token_usage": result.token_usage,
+        }
+    except Exception as exc:
+        log.exception("Error generating slide deck")
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
