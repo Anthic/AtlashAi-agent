@@ -69,7 +69,7 @@ def route_after_critic(state: ResearchState) -> str:
     max_ret  = state.get("max_retries", 1)
 
     mode = state.get("mode", "deep")
-    threshold = 5 if mode == "fast" else 8
+    threshold = 5 if mode == "fast" else 7  # 5 for fast (supervisor handles quality), 7 for deep
     max_ret = 0 if mode == "fast" else max_ret
 
     if score >= threshold:

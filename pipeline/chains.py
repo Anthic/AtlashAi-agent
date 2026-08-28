@@ -292,11 +292,27 @@ STRICT INSTRUCTIONS:
 # ── Fallback-Powered Node Runners ─────────────────────────────────────────────
 
 def run_writer(state: dict, chain=None) -> dict:
-    """Fallback-powered Writer Node."""
+    """
+    Mode-aware Writer Node.
+
+    FAST MODE (mode="fast"):
+      1. Worker (Groq Qwen3.8-27B) drafts the full report quickly (~3-5s)
+      2. Anti-cutoff is DISABLED (no extra continuation calls)
+      3. Mistral Large reviews the draft ONCE as a Supervisor:
+           - If approved (score ≥ 7) → done immediately
+           - If rejected → Worker fixes ONLY the flagged issues (~3s)
+      Total: ~8-12s vs old ~15-25s
+
+    DEEP MODE (mode="deep"):
+      1. Master (Mistral Large) writes the full report (~15-25s)
+      2. Anti-cutoff enabled (up to 2 continuation calls if truncated)
+      3. Existing critic → rewrite loop handles quality
+    """
     if state.get("error") and not state.get("scraped_content"):
         return {**state, "report": "", "critique": ""}
 
     try:
+        mode = state.get("mode", "deep")
         topic = state.get("topic", "")
         verified_urls = state.get("verified_urls", [])
         verified_url_text = "\n".join(f"- {url}" for url in verified_urls) or "- None"
@@ -314,6 +330,16 @@ def run_writer(state: dict, chain=None) -> dict:
             if critique_feedback else ""
         )
 
+        # Decide writer tier based on mode
+        writer_tier = "worker" if mode == "fast" else "master"
+        # Anti-cutoff: disabled for fast (no extra LLM calls), enabled for deep
+        max_continuations = 0 if mode == "fast" else 2
+
+        log.info(
+            "Writer: mode=%s | tier=%s | anti-cutoff continuations=%d",
+            mode, writer_tier, max_continuations,
+        )
+
         # 1. Format the prompt
         formatted_messages = _writer_prompt.format_messages(
             topic=topic,
@@ -324,14 +350,12 @@ def run_writer(state: dict, chain=None) -> dict:
             verified_urls=verified_url_text,
         )
 
-        # 2. Execute via Resilient Master Cascade
-        res = execute_with_fallback(formatted_messages, tier="master")
+        # 2. Worker/Master writes the draft
+        res = execute_with_fallback(formatted_messages, tier=writer_tier)
         raw_report = res.content
+        log.info("Writer draft via [%s] (%d chars)", res.provider_used, len(raw_report))
 
-        # 3. Pass through Zero Cut-off & Grounded Sanitizer.
-        # Continuation runs at the SAME tier as the original write, and
-        # gets the topic + search results + rag context so it doesn't lose
-        # the thread if summarized_content happens to be empty.
+        # 3. Anti-cutoff (deep mode only)
         full_context = "\n\n".join(
             part for part in (summarized, search_results, rag_context) if part
         )
@@ -340,10 +364,38 @@ def run_writer(state: dict, chain=None) -> dict:
             context=full_context,
             verified_urls_text=verified_url_text,
             topic=topic,
-            tier="master",
+            tier=writer_tier,
+            max_continuations=max_continuations,
         )
 
-        log.info("Writer: report generated via [%s] (%d chars)", res.provider_used, len(final_report))
+        # 4. FAST MODE: Supervisor (Mistral Large) reviews ONCE
+        #    If issues found → Worker fixes specific parts only
+        if mode == "fast":
+            from agents.supervisor_agent import run_supervisor_review
+            log.info("Fast mode: running Mistral supervisor review...")
+            sv_result = run_supervisor_review(
+                topic=topic,
+                report=final_report,
+                verified_urls=verified_urls,
+                worker_tier="worker",
+            )
+            final_report = sv_result.final_report
+            log.info(
+                "Supervisor: approved=%s | score=%d | fix_applied=%s",
+                sv_result.approved_on_first_try,
+                sv_result.supervisor_score,
+                sv_result.fix_applied,
+            )
+            # Store supervisor score as critique_score so the graph can use it
+            return {
+                **state,
+                "report": final_report,
+                "critique_score": sv_result.supervisor_score,
+                "critique": f"Supervisor review: score {sv_result.supervisor_score}/10 | "
+                            f"fix_applied={sv_result.fix_applied}",
+            }
+
+        log.info("Writer: final report (%d chars)", len(final_report))
         return {**state, "report": final_report}
 
     except Exception as exc:
@@ -352,7 +404,11 @@ def run_writer(state: dict, chain=None) -> dict:
 
 
 def run_critic(state: dict, chain=None) -> dict:
-    """Fallback-powered Critic Node."""
+    """Fallback-powered Critic Node (deep mode only).
+    
+    In fast mode the supervisor_agent handles quality gating.
+    In deep mode this critic feeds the rewrite loop.
+    """
     report = state.get("report", "")
     if not report:
         return {**state, "critique": "No report to critique.", "critique_score": 0}
