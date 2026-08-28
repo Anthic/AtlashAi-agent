@@ -186,11 +186,35 @@ def execute_with_fallback(
             )
             _mark_cooldown(model_key)
             errors.append(f"{model_key}: {exc}")
+
+            try:
+                from pipeline.alert_watcher import notify_model_fallback
+                curr_idx = candidate_keys.index(model_key)
+                next_model = candidate_keys[curr_idx + 1] if curr_idx + 1 < len(candidate_keys) else "None (Exhausted)"
+                notify_model_fallback(
+                    failed_model=model_key,
+                    next_model=next_model,
+                    reason=str(exc),
+                    agent_name=f"LLM Cascade ({tier})"
+                )
+            except Exception:
+                pass
             continue
 
     total_duration = time.time() - start_time
     error_summary = " | ".join(errors)
     log.critical("All fallback cascade providers failed! Errors: %s", error_summary)
+
+    try:
+        from pipeline.alert_watcher import notify_pipeline_error
+        notify_pipeline_error(
+            stage=f"LLM Cascade ({tier}) - All Providers Failed",
+            topic="LLM Inference",
+            error_msg=error_summary
+        )
+    except Exception:
+        pass
+
     raise RuntimeError(
         f"All LLM fallback providers exhausted ({total_duration:.2f}s). Root causes: {error_summary}"
     )

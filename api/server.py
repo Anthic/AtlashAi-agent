@@ -264,6 +264,16 @@ def _run_pipeline_background(job_id: str, topic: str, user_id: Optional[str] = N
             "stage":    " Failed",
             "error":    str(exc),
         })
+        try:
+            from pipeline.alert_watcher import notify_pipeline_error
+            notify_pipeline_error(
+                stage="Deep Research Pipeline Execution",
+                topic=topic,
+                error_msg=str(exc),
+                user_id=user_id or "Anonymous",
+            )
+        except Exception:
+            pass
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @app.get("/")
