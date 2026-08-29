@@ -24,8 +24,8 @@ DEFAULT_WORKER_CASCADE = [
     "worker-openrouter",
 ]
 DEFAULT_MASTER_CASCADE = [
-    "master-mistral",
     "master-gemini",
+    "master-mistral",
     "master-openrouter",
 ]
 
@@ -160,11 +160,27 @@ def execute_with_fallback(
             llm: BaseChatModel = get_llm(model_key)
             call_start = time.time()
 
-            response = llm.invoke(
-                messages_or_prompt,
-                stop=stop,
-                config={"timeout": call_timeout_sec},
-            )
+            # ── Hard thread-level timeout ──────────────────────────────────
+            # IMPORTANT: Do NOT use `with ThreadPoolExecutor` here.
+            # The context manager's __exit__ calls shutdown(wait=True),
+            # which blocks until the LLM thread finishes — even after timeout.
+            # Instead, we manually shutdown(wait=False) to abandon the hung
+            # thread immediately and move to the next fallback provider.
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            _pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"llm-{model_key}")
+            _future = _pool.submit(llm.invoke, messages_or_prompt, stop)
+            try:
+                response = _future.result(timeout=call_timeout_sec)
+            except FuturesTimeout:
+                # Abandon the hung thread immediately — don't wait for it
+                _pool.shutdown(wait=False, cancel_futures=True)
+                raise TimeoutError(
+                    f"LLM call to [{model_key}] timed out after {call_timeout_sec}s"
+                )
+            finally:
+                # Clean up pool without waiting for the thread
+                _pool.shutdown(wait=False)
+
             call_duration = time.time() - call_start
 
             token_usage = _extract_token_usage(response)
@@ -178,6 +194,7 @@ def execute_with_fallback(
                 duration_sec=time.time() - start_time,
                 token_usage=token_usage,
             )
+
 
         except Exception as exc:
             log.warning(

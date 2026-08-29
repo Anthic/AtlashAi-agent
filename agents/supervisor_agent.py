@@ -167,11 +167,11 @@ def run_supervisor_review(
     )
 
     try:
-        log.info("Supervisor: Mistral Large reviewing draft (%d chars)...", len(report))
+        log.info("Supervisor: reviewing draft (%d chars)...", len(report))
         review_res = execute_with_fallback(
             review_prompt,
-            tier="master",            # Mistral Large
-            call_timeout_sec=25,
+            tier="master",            # Mistral Large (or Gemini Flash fallback)
+            call_timeout_sec=8,       # 8s: EC2 Mistral=3-5s ✓, local timeout→Gemini fallback
         )
         parsed = _parse_supervisor_response(review_res.content)
         log.info(

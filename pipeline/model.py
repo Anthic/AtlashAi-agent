@@ -31,7 +31,7 @@ MODEL_REGISTRY = {
     },
     "master-mistral": {
         "provider": "mistral",
-        "model": "mistral-large-latest",
+        "model": "mistral-small-latest",
         "temperature": 0.2,
     },
     "master-gemini": {
