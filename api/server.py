@@ -112,6 +112,9 @@ class SaveHistoryRequest(BaseModel):
 
 class JobResponse(BaseModel):
     job_id: str
+    # Returned to the trusted API gateway so it can enforce ownership before
+    # sending the job state to a browser.
+    user_id: Optional[str] = None
     status: str          # queued | running | done | failed
     progress: int = 0    # 0–100
     stage: str = ""      # current pipeline stage name
@@ -314,6 +317,7 @@ async def start_research(req: ResearchRequest):
 
     job_data = {
         "job_id":     job_id,
+        "user_id":    req.user_id,
         "topic":      req.topic,
         "status":     "queued",
         "progress":   0,
