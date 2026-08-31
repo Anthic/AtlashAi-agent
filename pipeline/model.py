@@ -11,12 +11,13 @@ log = logging.getLogger(__name__)
 MODEL_REGISTRY = {
     "worker-groq": {
         "provider": "groq",
-        "model": "qwen/qwen3.8-27b",  
+        "model": "openai/gpt-oss-120b",
         "temperature": 0.1,
     },
+
     "worker-gemini": {
         "provider": "google",
-        "model": "gemini-3.5-flash-lite",   
+        "model": "gemini-3.6-flash",
         "temperature": 0.1,
     },
     "worker-mistral": {
@@ -26,7 +27,7 @@ MODEL_REGISTRY = {
     },
     "worker-openrouter": {
         "provider": "openrouter",
-        "model": "qwen/qwen-2.5-72b-instruct:free",
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
         "temperature": 0.1,
     },
     "master-mistral": {
@@ -36,15 +37,16 @@ MODEL_REGISTRY = {
     },
     "master-gemini": {
         "provider": "google",
-        "model": "gemini-3.5-flash-lite",   
+        "model": "gemini-3.6-flash",
         "temperature": 0.2,
     },
     "master-openrouter": {
         "provider": "openrouter",
-        "model": "deepseek/deepseek-r1:free",
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
         "temperature": 0.2,
     },
 }
+
 _llm_cache : Dict[str, BaseChatModel] = {}
 _lock = threading.Lock()
 

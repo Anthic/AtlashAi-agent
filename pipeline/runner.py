@@ -91,10 +91,11 @@ def bump_retry(state: ResearchState) -> ResearchState:
  
 def run_critic_node(state: dict) -> dict:
     """Run critic and parse numeric score into state."""
-    truncated = {**state, "report": state.get("report", "")[:3000]}
-    updated = run_critic(truncated)
+    full_report = state.get("report", "")
+    updated = run_critic(state)
     updated["critique_score"] = parse_score(updated.get("critique", ""))
     return updated
+
  
  
 def run_writer_node(state: dict) -> dict:

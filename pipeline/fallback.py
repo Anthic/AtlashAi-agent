@@ -24,14 +24,17 @@ DEFAULT_WORKER_CASCADE = [
     "worker-openrouter",
 ]
 DEFAULT_MASTER_CASCADE = [
-    "master-gemini",
     "master-mistral",
+    "worker-groq",
+    "master-gemini",
     "master-openrouter",
 ]
 
+
 # Per-call timeout in seconds. Prevents a hung/slow provider from stalling
-# the whole cascade (llm.invoke() has no timeout by default).
-DEFAULT_CALL_TIMEOUT_SEC = 20
+# the whole cascade while allowing sufficient time for deep research drafting.
+DEFAULT_CALL_TIMEOUT_SEC = 60
+
 
 # How long (seconds) to skip a provider after it fails, so a cascade doesn't
 # keep re-trying a provider that's mid rate-limit-cooldown on every request.

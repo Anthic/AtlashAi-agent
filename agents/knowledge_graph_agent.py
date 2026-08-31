@@ -9,7 +9,8 @@ log = logging.getLogger(__name__)
 class Node(BaseModel):
     id: str
     label: str
-    type: Literal["topic", "concept", "organization", "person", "technology"]
+    type: str = Field(default="concept", description="Entity category: topic, concept, organization, person, technology, or application")
+
 
 class Edge(BaseModel):
     source: str = Field(description="id of the source node")
