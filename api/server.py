@@ -169,6 +169,17 @@ class SlideDeckRequest(BaseModel):
     num_slides: Optional[int] = Field(default=8, ge=5, le=15)
     user_id: Optional[str] = None
 
+class DefenseQuestionsRequest(BaseModel):
+    title: str = Field(..., min_length=3)
+    content: str = Field(..., min_length=20)
+    user_id: Optional[str] = None
+
+class DefenseEvaluateRequest(BaseModel):
+    examiner_name: str
+    examiner_title: str
+    question: str
+    student_answer: str = Field(..., min_length=5)
+    user_id: Optional[str] = None
 
 
 # ── Background runner ──────────────────────────────────────────────────────────
@@ -621,6 +632,33 @@ def create_slide_deck(req: SlideDeckRequest):
         log.exception("Error generating slide deck")
         raise HTTPException(status_code=500, detail=str(exc))
 
+# ── Phase 4: Thesis Defense Simulator ─────────────────────────────────────────
+
+@app.post("/api/v1/academic/defense/questions", tags=["Phase 4: Academic AI"])
+def get_defense_questions(req: DefenseQuestionsRequest):
+    """Generates 3 tough viva interrogation questions from the committee."""
+    try:
+        from agents.defense_simulator_agent import generate_defense_questions
+        return generate_defense_questions(paper_title=req.title, paper_content=req.content)
+    except Exception as exc:
+        log.exception("Error generating defense questions")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/v1/academic/defense/evaluate", tags=["Phase 4: Academic AI"])
+def evaluate_defense(req: DefenseEvaluateRequest):
+    """Evaluates student rebuttal and returns scores and academic verdict."""
+    try:
+        from agents.defense_simulator_agent import evaluate_defense_rebuttal
+        return evaluate_defense_rebuttal(
+            examiner_name=req.examiner_name,
+            examiner_title=req.examiner_title,
+            question=req.question,
+            student_answer=req.student_answer,
+        )
+    except Exception as exc:
+        log.exception("Error evaluating defense rebuttal")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
