@@ -4,6 +4,7 @@ pipeline/fallback.py
 Resilient Multi-Provider Fallback Cascade with Execution Metadata.
 Zero-failure guarantee across Groq, Gemini, Mistral, and OpenRouter.
 """
+
 import time
 import logging
 import threading
@@ -171,7 +172,8 @@ def execute_with_fallback(
             # thread immediately and move to the next fallback provider.
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
             _pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"llm-{model_key}")
-            _future = _pool.submit(llm.invoke, messages_or_prompt, stop)
+            kwargs = {"stop": stop} if stop else {}
+            _future = _pool.submit(llm.invoke, messages_or_prompt, **kwargs)
             try:
                 response = _future.result(timeout=call_timeout_sec)
             except FuturesTimeout:

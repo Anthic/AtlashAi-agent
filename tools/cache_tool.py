@@ -35,14 +35,8 @@ _CACHED_NONE = {"__cached_none__": True}
 
 def _redis_command(*args) -> Any:
     """
-    Execute any Redis command via Upstash REST API.
-    https://upstash.com/docs/redis/features/restapi
-
-    Args:
-        *args: Redis command + arguments, e.g. ("GET", "mykey") or ("SET", "k", "v", "EX", 60)
-
-    Returns:
-        Parsed JSON result from Upstash, or None on error.
+    Execute any Redis command via Upstash REST API using POST JSON array.
+    This prevents HTTP 414 'Request-URI Too Large' for large research reports.
     """
     if not UPSTASH_REDIS_URL or not UPSTASH_REDIS_TOKEN:
         log.debug("Cache: Upstash not configured — skipping")
@@ -50,13 +44,13 @@ def _redis_command(*args) -> Any:
 
     import httpx
 
-    # Encode path segments (safe='' encodes everything including /)
-    encoded_args = [quote(str(a), safe='') for a in args]
-    url     = f"{UPSTASH_REDIS_URL.rstrip('/')}/{'/'.join(encoded_args)}"
-    headers = {"Authorization": f"Bearer {UPSTASH_REDIS_TOKEN}"}
-
+    url = UPSTASH_REDIS_URL.rstrip('/')
+    headers = {
+        "Authorization": f"Bearer {UPSTASH_REDIS_TOKEN}",
+        "Content-Type": "application/json",
+    }
     try:
-        response = httpx.get(url, headers=headers, timeout=5)
+        response = httpx.post(url, json=list(args), headers=headers, timeout=5)
         response.raise_for_status()
         data = response.json()
         return data.get("result")
