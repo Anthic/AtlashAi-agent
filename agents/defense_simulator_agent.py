@@ -3,6 +3,8 @@ import logging
 import re
 from typing import Dict, Any, List, Optional
 from pipeline.fallback import execute_with_fallback, CascadeExecutionResult
+from tools.you_search_tool import search_academic_critiques
+
 log = logging.getLogger(__name__)
 
 
@@ -23,7 +25,9 @@ Return strictly a valid JSON array containing exactly 3 objects (do NOT include 
     "avatar_badge": "🔬",
     "targeted_section": "Section name or claim in paper",
     "question": "Exact tough question challenging their methodology",
-    "what_examiner_looks_for": "Key proof or reasoning needed to survive this question"
+    "what_examiner_looks_for": "Key proof or reasoning needed to survive this question",
+    "live_evidence": "Real-world limitation or critique discovered from web/literature",
+    "web_citations": ["https://url1", "https://url2"]
   },
   {
     "examiner_id": "evelyn",
@@ -32,7 +36,9 @@ Return strictly a valid JSON array containing exactly 3 objects (do NOT include 
     "avatar_badge": "⚡",
     "targeted_section": "Prior art or novelty claim",
     "question": "Exact tough question challenging originality",
-    "what_examiner_looks_for": "Theoretical justification and baseline comparison"
+    "what_examiner_looks_for": "Theoretical justification and baseline comparison",
+    "live_evidence": "Real-world limitation or critique discovered from web/literature",
+    "web_citations": ["https://url1", "https://url2"]
   },
   {
     "examiner_id": "hastings",
@@ -41,7 +47,9 @@ Return strictly a valid JSON array containing exactly 3 objects (do NOT include 
     "avatar_badge": "🏛️",
     "targeted_section": "Real-world scalability or limitations",
     "question": "Exact tough question on failure modes or cost",
-    "what_examiner_looks_for": "Pragmatic engineering or clinical constraints acknowledged"
+    "what_examiner_looks_for": "Pragmatic engineering or clinical constraints acknowledged",
+    "live_evidence": "Real-world limitation or critique discovered from web/literature",
+    "web_citations": ["https://url1", "https://url2"]
   }
 ]
 """
@@ -65,29 +73,60 @@ Return strictly a valid JSON object (no markdown, no preamble):
 }}
 """
 
-def generate_defense_questions (
-    paper_title : str,
-    paper_content : str,
-    custom_cascade : Optional[List[str]] = None
-) -> Dict[str, Any] :
-    """Generates 3 tough committee questions from the 3 examiners."""
+def generate_defense_questions(
+    paper_title: str,
+    paper_content: str,
+    custom_cascade: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """Generates 3 tough committee questions enriched with live web critiques from You.com."""
+    
+  
+    live_critique_text = ""
+    citations = []
+    try:
+        critique_results = search_academic_critiques(topic=paper_title[:80])
+        if critique_results:
+            snippets = []
+            for r in critique_results:
+                citations.append(r["url"])
+                snippets.extend(r.get("snippets", [])[:2])
+            live_critique_text = "\n".join(snippets[:4])
+    except Exception as e:
+        log.warning(f"Could not fetch live critiques: {e}")
+
+  
+    critique_prompt_section = ""
+    if live_critique_text:
+        critique_prompt_section = f"\n[REAL-WORLD WEB CRITIQUES & DISCUSSIONS (via You.com)]\n{live_critique_text}\n"
+
     full_prompt = (
         f"[SYSTEM]\n{COMMITTEE_QUESTIONS_PROMPT}\n\n"
         f"[PAPER TITLE]\n{paper_title}\n\n"
-        f"[PAPER BODY / EXCERPT]\n{paper_content[:12000]}\n\n"
+        f"{critique_prompt_section}"
+        f"[PAPER BODY / EXCERPT]\n{paper_content[:10000]}\n\n"
         f"[COMMITTEE INTERROGATION QUESTIONS]"        
     )
 
     result = execute_with_fallback(full_prompt, custom_cascade=custom_cascade)
     raw = result.content.strip() 
 
-    json_match = re.search(r"\{.*?\}", raw, re.DOTALL)
-    if json_match : 
-        try : 
+    json_match = re.search(r"\[\s*\{.*?\}\s*\]", raw, re.DOTALL) or re.search(r"\{.*?\}", raw, re.DOTALL)
+    if json_match: 
+        try: 
             questions = json.loads(json_match.group(0))
-            return {"title" : paper_title, "questions" : questions, "provider" : result.provider_used}
+            if isinstance(questions, dict) and "questions" in questions:
+                questions = questions["questions"]
+            return {
+                "title": paper_title, 
+                "questions": questions, 
+                "provider": result.provider_used,
+                "web_grounded": bool(live_critique_text),
+                "citations": citations[:5]
+            }
         except Exception:
             pass
+
+    
     return {
         "title": paper_title,
         "questions": [
@@ -99,11 +138,14 @@ def generate_defense_questions (
                 "targeted_section": "Methodology",
                 "question": "How did you guarantee that your experimental setup did not suffer from selection bias or data leakage?",
                 "what_examiner_looks_for": "Rigorous cross-validation or baseline isolation",
+                "live_evidence": "Recent discussions highlight frequent benchmark overfitting.",
+                "web_citations": []
             }
         ],
         "provider": result.provider_used,
+        "web_grounded": False,
+        "citations": []
     }
-
 
 def evaluate_defense_rebuttal(
     examiner_name: str,

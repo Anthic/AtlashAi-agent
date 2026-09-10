@@ -181,7 +181,10 @@ class DefenseEvaluateRequest(BaseModel):
     student_answer: str = Field(..., min_length=5)
     user_id: Optional[str] = None
 
-
+class TemporalFactCheckRequest(BaseModel):
+    title: str
+    content: str
+    user_id: Optional[str] = None
 # ── Background runner ──────────────────────────────────────────────────────────
 
 
@@ -661,6 +664,19 @@ def evaluate_defense(req: DefenseEvaluateRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+# ── Phase 4: Temporal Fact-Checker (Live Web Grounding) ──────────────────────
+
+@app.post("/api/v1/academic/fact-check/temporal", tags=["Phase 4: Academic AI"])
+def run_temporal_fact_check(req: TemporalFactCheckRequest):
+    """Verifies paper claims against live 2024-2026 web benchmarks using You.com."""
+    try:
+        from agents.fact_check_agent import verify_paper_claims_live
+        return verify_paper_claims_live(paper_title=req.title, paper_content=req.content)
+    except Exception as exc:
+        log.exception("Error running temporal fact-check")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -676,5 +692,4 @@ if __name__ == "__main__":
         reload=False,    # reload=True requires running via uvicorn CLI
         log_level="info",
     )
-
 
