@@ -75,11 +75,16 @@ jobs:
             # 2. Or if YDC_API_KEY is provided individually, ensure it exists in .env
             elif [ -n "$YDC_API_KEY" ] && [ -f ".env" ]; then
               if grep -q "^YDC_API_KEY=" .env; then
-                sed -i "s|^YDC_API_KEY=.*|YDC_API_KEY=\"$YDC_API_KEY\"|" .env
+                sed -i "s|^YDC_API_KEY=.*|YDC_API_KEY=$YDC_API_KEY|" .env
               else
-                echo "YDC_API_KEY=\"$YDC_API_KEY\"" >> .env
+                echo "YDC_API_KEY=$YDC_API_KEY" >> .env
               fi
               echo " YDC_API_KEY synced into .env automatically!"
+            fi
+
+            # Clean all quotes from .env so Docker --env-file doesn't pass literal quotes
+            if [ -f ".env" ]; then
+              sed -i -E 's/^([A-Za-z0-9_]+)=["'"'"'](.*)["'"'"']$/\1=\2/' .env
             fi
 
             # Restart service or docker container
