@@ -7,9 +7,13 @@ Auto-saves every completed result to research history.
 
 import time
 from typing import Generator
-from .runner import build_pipeline
 
 _pipeline_cache : dict = {}
+
+
+def build_pipeline(*args, **kwargs):
+    from .runner import build_pipeline as _bp
+    return _bp(*args, **kwargs)
 
 
 def _get_pipeline(mode: str = "deep"):
