@@ -57,7 +57,7 @@ def create_llm_instance(provider: str, model_name: str, temperature: float = 0.0
 
     if provider == "groq":
         from langchain_groq import ChatGroq
-        api_key = os.getenv("GROQ_API_KEY")
+        api_key = (os.getenv("GROQ_API_KEY") or "").strip('"').strip("'")
         if not api_key:
             raise ValueError("GROQ_API_KEY is not set in environment variables.")
         return ChatGroq(
@@ -69,7 +69,7 @@ def create_llm_instance(provider: str, model_name: str, temperature: float = 0.0
 
     elif provider in ("google", "gemini"):
         from langchain_google_genai import ChatGoogleGenerativeAI
-        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        api_key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip('"').strip("'")
         if not api_key:
             raise ValueError("GEMINI_API_KEY is not set in environment variables.")
         return ChatGoogleGenerativeAI(
@@ -81,7 +81,7 @@ def create_llm_instance(provider: str, model_name: str, temperature: float = 0.0
 
     elif provider == "mistral":
         from langchain_mistralai import ChatMistralAI
-        api_key = os.getenv("MISTRALAI_API_KEY")
+        api_key = (os.getenv("MISTRALAI_API_KEY") or "").strip('"').strip("'")
         if not api_key:
             raise ValueError("MISTRALAI_API_KEY is not set in environment variables.")
         return ChatMistralAI(
@@ -93,7 +93,7 @@ def create_llm_instance(provider: str, model_name: str, temperature: float = 0.0
 
     elif provider == "openrouter":
         from langchain_openai import ChatOpenAI
-        api_key = os.getenv("OPENROUTER_API_KEY")
+        api_key = (os.getenv("OPENROUTER_API_KEY") or "").strip('"').strip("'")
         if not api_key:
             raise ValueError("OPENROUTER_API_KEY is not set in environment variables.")
         return ChatOpenAI(

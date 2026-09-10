@@ -24,8 +24,8 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-UPSTASH_REDIS_URL   = os.getenv("UPSTASH_REDIS_URL", "")
-UPSTASH_REDIS_TOKEN = os.getenv("UPSTASH_REDIS_TOKEN", "")
+UPSTASH_REDIS_URL   = os.getenv("UPSTASH_REDIS_URL", "").strip('"').strip("'")
+UPSTASH_REDIS_TOKEN = os.getenv("UPSTASH_REDIS_TOKEN", "").strip('"').strip("'")
 
 _DEFAULT_TTL = 3600   # 1 hour
 _CACHED_NONE = {"__cached_none__": True}

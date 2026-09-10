@@ -88,9 +88,9 @@ jobs:
               docker compose up -d --build
             elif command -v docker &> /dev/null && [ -f "Dockerfile" ]; then
               docker build -t atlash-agent .
-              docker stop atlash-agent-container || true
-              docker rm atlash-agent-container || true
-              docker run -d --name atlash-agent-container -p 8000:8000 --env-file .env --restart always atlash-agent
+              docker stop atlash-agent-app atlash-agent-container || true
+              docker rm atlash-agent-app atlash-agent-container || true
+              docker run -d --name atlash-agent-app -p 8000:8000 --env-file .env --restart always atlash-agent
             else
               sudo systemctl restart atlash-agent || pm2 restart atlash-agent || true
             fi
