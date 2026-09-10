@@ -35,7 +35,7 @@ def run_reader_agent(state: dict, _reader) -> dict:
     All HTTP requests fire simultaneously via ThreadPoolExecutor.
     Total time = slowest single page (~4-6s), not sum of all pages.
     """
-    if state.get("error"):
+    if state.get("error") and not (state.get("verified_urls") or state.get("search_results")):
         return {**state, "scraped_content": ""}
 
     # Collect all verified URLs from the searcher

@@ -308,7 +308,13 @@ def run_writer(state: dict, chain=None) -> dict:
       2. Anti-cutoff enabled (up to 2 continuation calls if truncated)
       3. Existing critic → rewrite loop handles quality
     """
-    if state.get("error") and not state.get("scraped_content"):
+    has_content = bool(
+        state.get("summarized_content")
+        or state.get("search_results")
+        or state.get("scraped_content")
+        or state.get("rag_context")
+    )
+    if state.get("error") and not has_content:
         return {**state, "report": "", "critique": ""}
 
     try:
