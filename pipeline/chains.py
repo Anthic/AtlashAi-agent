@@ -40,13 +40,13 @@ fact-checked, so precision is critical.
 STRICT RULES:
 1. ONLY use facts from the provided sources below. Never invent data.
 2. If a fact is not in the provided context, omit that claim or subsection entirely.
-3. ONLY cite URLs from the verified_urls list — never modify or create URLs.
+3. ONLY cite URLs from the verified_urls list using inline [Source N] citations — never modify or create URLs.
 4. Every claim must have a [Source N] citation.
 5. If sources conflict, mention both and prefer the most recent one.
 6. Use clear, professional language. Avoid filler phrases.
 7. Do NOT include any horizontal rules (---) between sections.
 8. Never write placeholders such as "Not found in sources" or "[UNVERIFIED]".
-9. Do NOT append any conversational preamble, postamble, or JSON summary. Your report must end strictly with the Conclusion or Sources section.""",
+9. Do NOT append a Sources, References, or URL list at the end of the text — the web interface already provides a dedicated interactive citation panel. Your report must end strictly with the ## Conclusion section.""",
         ),
         (
             "human",
@@ -64,7 +64,7 @@ RAG Context:
 
 {critique_section}
 
-Only use these verified URLs in citations and in the Sources section:
+Verified URLs for inline citations ([Source 1], [Source 2], etc.):
 {verified_urls}
 
 Output format:
@@ -73,8 +73,7 @@ Output format:
 ### Finding 1
 ### Finding 2
 ### Finding 3
-## Conclusion
-## Sources""",
+## Conclusion""",
         ),
     ]
 )
@@ -120,6 +119,9 @@ def sanitize_final_report(report: str) -> str:
     cleaned = _RE_JSON_SPLIT.split(report)[0]
     cleaned = _RE_JSON_BLOCK.sub("", cleaned)
     cleaned = _RE_HLINE.sub("", cleaned)
+    # Strip any trailing Sources / References / Citations heading and its link list,
+    # because the frontend UI already displays its own interactive citations component.
+    cleaned = re.split(r"\n\s*#{2,4}\s*(?:Sources|References|Citations)\b", cleaned, flags=re.IGNORECASE)[0]
     output = []
     artifact_patterns = (
         "removed due to lack of source evidence",
@@ -143,25 +145,17 @@ def _looks_complete(text: str) -> bool:
     True if `text` looks like it ends at a legitimate stopping point:
     normal sentence punctuation, a closed code fence, a markdown table row,
     or a bullet/plain source URL line.
-
-    Trailing quote/bracket characters (e.g. a closing " after a period) are
-    stripped before the punctuation check, since a model may legitimately
-    end a quoted clause with `."` and that's still a complete sentence.
-
-    Deliberately does NOT treat bare ')', ']', '>' or '|' as complete on
-    their own — those are far too common mid-sentence (e.g. "...as shown
-    (Smith, 2023" or "...value is >10") and would cause false "complete"
-    detections.
     """
     if not text:
         return True
     stripped = text.rstrip()
-    # Peel off trailing closing-quote/bracket characters before checking
-    # for sentence-ending punctuation, e.g. `disorders."` should count as
-    # ending in `.` even though the literal last character is `"`.
     core = stripped.rstrip("\"'”’)]")
     if core.endswith((".", "!", "?", "।")):
         return True
+    # If the report has a Conclusion section that ends cleanly
+    if re.search(r"#{2,4}\s*Conclusion\b", text, re.IGNORECASE):
+        if re.search(r"[\.!\?।]\s*(?:\[(?:Source\s*)?\d+\])?\s*$", stripped):
+            return True
     lines = stripped.splitlines()
     last_line = lines[-1] if lines else ""
     return bool(_RE_COMPLETE_LINE.match(last_line))
