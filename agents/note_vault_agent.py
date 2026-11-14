@@ -1,4 +1,3 @@
-from numpy import deg2rad
 import hashlib
 import logging
 import os
@@ -16,6 +15,7 @@ from qdrant_client.models import (
     MatchValue,
 )
 from pipeline.fallback import execute_with_fallback, CascadeExecutionResult
+from tools.safety import wrap_untrusted, build_messages
 
 
 load_dotenv()
@@ -73,13 +73,42 @@ async def ensure_vault_collection() :
 
 
 def _get_embedding(text : str)-> List[float] : 
-    """Generate 384-d vector embedding using FastEmbed."""
+    """Generate 384-d vector embedding using FastEmbed (CPU-bound: call via _aembed in async code)."""
 
     if _embedder is None :
         raise RuntimeError("Embedding model not loaded. Cannot generate embeddings.")
 
     embeddding = list(_embedder.embed([text]))
     return embeddding[0].tolist()
+
+
+async def _aembed(text: str) -> List[float]:
+    """Run the CPU-bound embedding off the event loop."""
+    import asyncio
+    return await asyncio.to_thread(_get_embedding, text)
+
+
+async def delete_note_vectors(note_id: str, user_id: str) -> int:
+    """
+    Remove a note's vector(s) from the vault. Call when a note is edited (before
+    re-sync) or deleted so stale content is never retrieved by the drafter.
+    Always scoped to user_id, so a caller cannot delete another user's note.
+    """
+    if not QDRANT_URL or not QDRANT_API_KEY:
+        return 0
+    client = await _get_qdrant_client()
+    try:
+        await client.delete(
+            collection_name=VAULT_COLLECTION,
+            points_selector=Filter(must=[
+                FieldCondition(key="noteId", match=MatchValue(value=note_id)),
+                FieldCondition(key="userId", match=MatchValue(value=user_id)),
+            ]),
+        )
+        log.info("Deleted vault vectors for note [%s] user [%s].", note_id, user_id)
+        return 1
+    finally:
+        await client.close()
 
 
 async def sync_note_to_vault(
@@ -96,8 +125,8 @@ async def sync_note_to_vault(
     """
     await ensure_vault_collection()
     combined_text = f"Title: {title}\nTags: {', '.join(tags or [])}\nContent: {content}"
-    vector = _get_embedding(combined_text)
-    # Deterministic UUID from note_id
+    vector = await _aembed(combined_text)
+    # Deterministic UUID from note_id (same id on re-sync => upsert replaces the old vector)
     point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{user_id}_{note_id}"))
     payload = {
         "noteId": note_id,
@@ -132,7 +161,7 @@ async def search_vault_notes(
 ) -> List[Dict]:
     """Semantic similarity search across a user's private notes."""
     await ensure_vault_collection()
-    query_vector = _get_embedding(query)
+    query_vector = await _aembed(query)
     user_filter = Filter(
         must=[
             FieldCondition(
@@ -177,6 +206,7 @@ def draft_paper_section_with_notes(
             f"--- Note: {n.get('title', 'Untitled')} ---\n{n.get('content', '')}"
             for n in retrieved_notes
         )
+        notes_context = wrap_untrusted(notes_context, "user_notes")
     else:
         notes_context = "No specific user notes attached. Synthesize from academic knowledge."
     system_prompt = (
@@ -189,12 +219,12 @@ def draft_paper_section_with_notes(
         "3. Do NOT invent fake numerical data that contradicts the notes.\n"
         "4. Format the output in clean Markdown."
     )
-    full_prompt = (
-        f"[SYSTEM]\n{system_prompt}\n\n"
+    full_prompt = build_messages(
+        system_prompt,
         f"[USER RESEARCH NOTES CONTEXT]\n{notes_context}\n\n"
         f"[SECTION TOPIC]\n{section_topic}\n\n"
         f"[INSTRUCTIONS]\n{instructions}\n\n"
-        f"[ACADEMIC SECTION DRAFT]"
+        f"[ACADEMIC SECTION DRAFT]",
     )
     log.info("Drafting paper section for topic: '%s'", section_topic)
     return execute_with_fallback(

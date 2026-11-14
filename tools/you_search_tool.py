@@ -26,23 +26,19 @@ def you_web_search(query: str, num_web_results: int = 5) -> List[Dict[str, Any]]
         return []
 
     def _fetch_from_api(_: str) -> dict:
-        try:
-            headers = {"X-API-Key": YDC_API_KEY}
-            params = {
-                "query": clean_query,
-                "num_web_results": num_web_results
-            }
-            resp = requests.get(YDC_SEARCH_URL, headers=headers, params=params, timeout=10)
-            if resp.status_code == 200:
-                return resp.json()
-            else:
-                log.error(f"You.com API error {resp.status_code}: {resp.text}")
-                return {"results": {"web": []}}
-        except Exception as e:
-            log.exception(f"Exception during You.com API call: {str(e)}")
-            return {"results": {"web": []}}
+        # Raise on failure so nothing is cached; the caller below turns it into [].
+        headers = {"X-API-Key": YDC_API_KEY}
+        params = {"query": clean_query, "num_web_results": num_web_results}
+        resp = requests.get(YDC_SEARCH_URL, headers=headers, params=params, timeout=10)
+        if resp.status_code != 200:
+            raise RuntimeError(f"You.com API error {resp.status_code}: {resp.text[:200]}")
+        return resp.json()
 
-    cached_data = cached_search(f"you:{clean_query}", _fetch_from_api, ttl=3600)
+    try:
+        cached_data = cached_search(f"you:{clean_query}", _fetch_from_api, ttl=3600)
+    except Exception as e:
+        log.warning("You.com search failed: %s", e)
+        return []
 
     # You.com returns data inside results -> web, or legacy hits
     hits = []

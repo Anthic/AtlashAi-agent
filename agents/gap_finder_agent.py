@@ -2,6 +2,7 @@
 import logging
 from typing import List, Optional
 from pipeline.fallback import execute_with_fallback, CascadeExecutionResult
+from tools.safety import wrap_untrusted, build_messages
 log = logging.getLogger(__name__)
 
 
@@ -64,15 +65,15 @@ def analyze_research_gaps(
     """
     context_block = ""
     if literature_context and literature_context.strip():
-        context_block = f"[PROVIDED LITERATURE & PAPERS CONTEXT]\n{literature_context}\n\n"
+        context_block = f"[PROVIDED LITERATURE & PAPERS CONTEXT]\n{wrap_untrusted(literature_context, 'literature')}\n\n"
     else:
         context_block = "[CONTEXT]\nSynthesize from broad peer-reviewed state-of-the-art literature.\n\n"
 
-    full_prompt = (
-        f"[SYSTEM]\n{SYSTEM_GAP_PROMPT}\n\n"
+    full_prompt = build_messages(
+        SYSTEM_GAP_PROMPT,
         f"{context_block}"
         f"[RESEARCH TOPIC TO ANALYZE]\n{topic}\n\n"
-        f"[LITERATURE MATRIX & GAP ANALYSIS REPORT]"
+        f"[LITERATURE MATRIX & GAP ANALYSIS REPORT]",
     )
 
     log.info("Running Literature Gap Finder for topic: '%s'", topic)

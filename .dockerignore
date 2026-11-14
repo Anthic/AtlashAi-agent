@@ -43,3 +43,6 @@ docker-compose*.yml
 
 # Keep .env OUT of image
 .env
+
+get-pip.py
+*.pem

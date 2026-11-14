@@ -17,8 +17,11 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 # ── Now safe to import project modules ────────────────────────────────────────
+import secrets
+
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -27,20 +30,54 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
+# ── Security config ───────────────────────────────────────────────────────────
+# Shared secret between the Node backend and this service. When set, every route
+# except "/" and "/health" requires header  X-Internal-Key: <secret>.
+INTERNAL_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
+_PUBLIC_PATHS = {"/", "/health"}
+
+# Browser origins allowed to call this API directly. Empty (default) = none: the
+# Node backend calls server-to-server and needs no CORS. Never "*".
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+
+# A finished job whose report is shorter than this is treated as failed.
+MIN_REPORT_CHARS = int(os.getenv("MIN_REPORT_CHARS", "200"))
+
+# Input size caps (one request must not push megabytes into the LLM cascade).
+MAX_DOC_CHARS = int(os.getenv("MAX_DOC_CHARS", "60000"))
+MAX_NOTE_CHARS = int(os.getenv("MAX_NOTE_CHARS", "50000"))
+MAX_ANSWER_CHARS = 10000
+
+
+def require_internal_key(request: Request, x_internal_key: str = Header(default="")):
+    """Reject callers that do not present the shared secret (constant-time compare)."""
+    if request.url.path in _PUBLIC_PATHS or not INTERNAL_KEY:
+        return
+    if not secrets.compare_digest(x_internal_key.encode(), INTERNAL_KEY.encode()):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+if not INTERNAL_KEY:
+    log.warning(
+        "INTERNAL_API_KEY is NOT set: the Python API accepts unauthenticated requests. "
+        "Set INTERNAL_API_KEY here and in the Node backend (X-Internal-Key header)."
+    )
+
 # ── App ────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="Multi-Agent Research System",
     description="AI-powered deep research: QueryRewrite → Search → RAG → FactCheck → Report",
     version="3.0.0",
+    dependencies=[Depends(require_internal_key)],
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # For dev only - no credentials support
-    allow_credentials=False,  # Set True only with explicit origins
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "X-Internal-Key"],
 )
 
 
@@ -48,12 +85,19 @@ app.add_middleware(
 
 class JobStore:
     """
-    Stores job state in Upstash Redis.
-    Falls back to a plain dict if Redis is unavailable (dev mode).
+    Job state store.
+
+    The in-process dict is the source of truth for jobs this process runs (the
+    pipeline thread lives here), and Upstash Redis is a best-effort mirror so other
+    workers / restarts can still see the job. Reading local-first also removes
+    ~1 Redis command per poll, which is what exhausted the free quota
+    (10K commands/day) and made every poll return "job not found".
     """
-    _local: dict = {}   # fallback in-memory store
-    _locks: dict = {}   # per-job locks
+    _local: dict = {}
+    _local_ts: dict = {}
+    _locks: dict = {}
     _global_lock = threading.Lock()
+    _LOCAL_TTL = 7200
 
     def _get_lock(self, job_id: str) -> threading.Lock:
         with self._global_lock:
@@ -64,28 +108,40 @@ class JobStore:
     def _redis_key(self, job_id: str) -> str:
         return f"job:{job_id}"
 
-    def set(self, job_id: str, data: dict, ttl: int = 3600) -> None:
-        from tools.cache_tool import cache_put
-        try:
-            cache_put(self._redis_key(job_id), data, ttl=ttl)
-        except Exception:
-            self._local[job_id] = data  # fallback
+    def _purge_expired(self) -> None:
+        cutoff = time.time() - self._LOCAL_TTL
+        for jid in [j for j, t in self._local_ts.items() if t < cutoff]:
+            self._local.pop(jid, None)
+            self._local_ts.pop(jid, None)
+            self._locks.pop(jid, None)
+
+    def set(self, job_id: str, data: dict, ttl: int = 3600, mirror: bool = True) -> None:
+        with self._global_lock:
+            self._local[job_id] = data
+            self._local_ts[job_id] = time.time()
+            self._purge_expired()
+        if mirror:
+            from tools.cache_tool import cache_put
+            if not cache_put(self._redis_key(job_id), data, ttl=ttl):
+                log.debug("JobStore: Redis mirror skipped for %s (using in-memory copy)", job_id)
 
     def get(self, job_id: str) -> Optional[dict]:
+        local = self._local.get(job_id)
+        if local is not None:
+            return local
         from tools.cache_tool import cache_get
         try:
-            result = cache_get(self._redis_key(job_id))
-            if result is not None:
-                return result
+            return cache_get(self._redis_key(job_id))
         except Exception:
-            pass
-        return self._local.get(job_id)  # fallback
+            return None
 
     def update(self, job_id: str, patch: dict) -> None:
         with self._get_lock(job_id):
-            existing = self.get(job_id) or {}
+            existing = dict(self.get(job_id) or {})
             existing.update(patch)
-            self.set(job_id, existing)
+            # Mirror to Redis only on meaningful transitions (not every progress tick)
+            terminal = existing.get("status") in ("done", "failed")
+            self.set(job_id, existing, ttl=7200, mirror=terminal or "status" in patch)
 
 
 _jobs = JobStore()
@@ -102,11 +158,11 @@ class SaveHistoryRequest(BaseModel):
     job_id: str
     user_id: str
     topic: str
-    report: str
-    critique: str
+    report: str = Field(..., max_length=MAX_DOC_CHARS * 2)
+    critique: str = Field(default="", max_length=20000)
     score: float
     fact_score: float
-    urls: list
+    urls: list = Field(default_factory=list, max_length=100)
     time_sec: float
 
 
@@ -143,47 +199,47 @@ class ParaphraseResponse(BaseModel) :
 class VaultSyncRequest(BaseModel):
     note_id: str
     user_id: str
-    title: str
-    content: str
-    tags: Optional[list] = []
+    title: str = Field(..., max_length=500)
+    content: str = Field(..., max_length=MAX_NOTE_CHARS)
+    tags: Optional[list] = Field(default_factory=list, max_length=50)
     source_url: Optional[str] = None
 class DraftSectionRequest(BaseModel):
     user_id: str
-    section_topic: str = Field(..., min_length=3)
-    instructions: Optional[str] = "Draft a comprehensive academic section."
+    section_topic: str = Field(..., min_length=3, max_length=1000)
+    instructions: Optional[str] = Field(default="Draft a comprehensive academic section.", max_length=2000)
 
 
 class GapFinderRequest(BaseModel):
     topic: str = Field(..., min_length=3, max_length=1000)
-    literature_context: Optional[str] = None
+    literature_context: Optional[str] = Field(default=None, max_length=MAX_DOC_CHARS)
     user_id: Optional[str] = None
 
 class PeerReviewRequest(BaseModel):
     title: str = Field(..., min_length=3, max_length=500)
-    content: str = Field(..., min_length=20)
+    content: str = Field(..., min_length=20, max_length=MAX_DOC_CHARS)
     user_id: Optional[str] = None
 
 class SlideDeckRequest(BaseModel):
     title: str = Field(..., min_length=3, max_length=500)
-    content: Optional[str] = None
+    content: Optional[str] = Field(default=None, max_length=MAX_DOC_CHARS)
     num_slides: Optional[int] = Field(default=8, ge=5, le=15)
     user_id: Optional[str] = None
 
 class DefenseQuestionsRequest(BaseModel):
-    title: str = Field(..., min_length=3)
-    content: str = Field(..., min_length=20)
+    title: str = Field(..., min_length=3, max_length=500)
+    content: str = Field(..., min_length=20, max_length=MAX_DOC_CHARS)
     user_id: Optional[str] = None
 
 class DefenseEvaluateRequest(BaseModel):
-    examiner_name: str
-    examiner_title: str
-    question: str
-    student_answer: str = Field(..., min_length=5)
+    examiner_name: str = Field(..., max_length=200)
+    examiner_title: str = Field(..., max_length=200)
+    question: str = Field(..., max_length=3000)
+    student_answer: str = Field(..., min_length=5, max_length=MAX_ANSWER_CHARS)
     user_id: Optional[str] = None
 
 class TemporalFactCheckRequest(BaseModel):
-    title: str
-    content: str
+    title: str = Field(..., max_length=500)
+    content: str = Field(..., max_length=MAX_DOC_CHARS)
     user_id: Optional[str] = None
 # ── Background runner ──────────────────────────────────────────────────────────
 
@@ -244,14 +300,37 @@ def _run_pipeline_background(job_id: str, topic: str, user_id: Optional[str] = N
                 final_result = event["__done__"]
 
         # Job finished
+        report = (final_result.get("report") or "").strip()
+        if len(report) < MIN_REPORT_CHARS:
+            # Do not present an empty / error-only run as "done": the Node side treats
+            # "failed" as the trigger to refund the charge or free-quota use.
+            reason = final_result.get("error") or "empty_report"
+            log.error("Job %s produced no usable report (%d chars): %s", job_id, len(report), reason)
+            _jobs.update(job_id, {
+                "status":   "failed",
+                "progress": 0,
+                "stage":    " Failed",
+                "error":    f"empty_report: {reason}"[:500],
+            })
+            try:
+                from pipeline.alert_watcher import notify_pipeline_error
+                notify_pipeline_error(stage="Research produced empty report", topic=topic,
+                                      error_msg=str(reason), user_id=user_id or "Anonymous")
+            except Exception:
+                pass
+            return
+
         job_result = {
             "job_id":           job_id,
             "user_id":          user_id,
             "topic":            final_result.get("topic", topic),
-            "report":           final_result.get("report", ""),
+            "report":           report,
             "critique":         final_result.get("critique", ""),
             "critique_score":   final_result.get("critique_score", 0),
             "fact_check_score": final_result.get("fact_check_score", 0.0),
+            "fact_check_parsed": final_result.get("fact_check_parsed", False),
+            "knowledge_graph":  final_result.get("knowledge_graph") or {},      # was dropped before
+            "knowledge_graph_md": final_result.get("knowledge_graph_md", ""),
             "rewritten_queries": final_result.get("rewritten_queries", []),
             "verified_urls":    final_result.get("verified_urls", []),
             "time_sec":         final_result.get("time_sec", 0),
@@ -314,7 +393,12 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check — returns 200 if the server is alive."""
-    return {"status": "ok", "service": "multi-agent-research", "version": "3.0.0"}
+    return {
+        "status": "ok",
+        "service": "multi-agent-research",
+        "version": "3.0.0",
+        "auth": "enabled" if INTERNAL_KEY else "DISABLED",
+    }
 
 
 
@@ -340,7 +424,7 @@ async def start_research(req: ResearchRequest):
         "error":      None,
         "created_at": now,
     }
-    _jobs.set(job_id, job_data, ttl=7200)  # keep for 2h
+    await run_in_threadpool(_jobs.set, job_id, job_data, 7200)  # keep for 2h
 
     # Fire background thread
     t = threading.Thread(
@@ -365,7 +449,7 @@ async def poll_job(job_id: str):
       done    — result ready in 'result' field
       failed  — error in 'error' field
     """
-    job = _jobs.get(job_id)
+    job = await run_in_threadpool(_jobs.get, job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     return job
@@ -381,12 +465,11 @@ async def stream_job(job_id: str):
     """
     async def event_generator():
         for _ in range(300):   # max 600s (300 × 2s)
-            job = _jobs.get(job_id)
+            job = await run_in_threadpool(_jobs.get, job_id)
             if not job:
                 yield f"event: error\ndata: {json.dumps({'message': 'job not found'})}\n\n"
                 return
 
-            import asyncio
             yield f"event: progress\ndata: {json.dumps(job)}\n\n"
 
             if job["status"] in ("done", "failed"):
@@ -396,7 +479,7 @@ async def stream_job(job_id: str):
 
         yield f"event: timeout\ndata: {{}}\n\n"
 
-    job = _jobs.get(job_id)
+    job = await run_in_threadpool(_jobs.get, job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
 
@@ -406,12 +489,11 @@ async def stream_job(job_id: str):
 @app.get("/history")
 async def get_history(limit: int = 10, userId: Optional[str] = None, user_id: Optional[str] = None):
     """List recent completed research sessions from Supabase."""
-    import asyncio
     try:
         from memory import get_recent
         target_uid = user_id or userId
-        log.info("=== Python API /history received userId=%r, user_id=%r, using target_uid=%r ===", userId, user_id, target_uid)
-        loop = asyncio.get_event_loop()
+        log.info("Python API /history userId=%r user_id=%r -> %r", userId, user_id, target_uid)
+        loop = asyncio.get_running_loop()
         records = await asyncio.wait_for(
             loop.run_in_executor(None, lambda: get_recent(limit=limit, user_id=target_uid)),
             timeout=8.0,
@@ -442,20 +524,25 @@ async def save_history_record(req: SaveHistoryRequest):
             "time_sec": req.time_sec,
             "error": "",
         }
-        loop = asyncio.get_event_loop()
-        rec_id = await loop.run_in_executor(None, lambda: save_research(job_result))
+        rec_id = await run_in_threadpool(save_research, job_result)
         return {"success": True, "id": rec_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/history/{record_id}")
-async def get_history_item(record_id: str):
-    """Get a single research record by numeric ID or job_id."""
+async def get_history_item(record_id: str, user_id: Optional[str] = None):
+    """Get a single research record by numeric ID or job_id.
+
+    Pass ?user_id=<verified user> so ownership is enforced (ids are sequential and
+    guessable). Without it the lookup is unscoped and only trusted callers
+    (holding X-Internal-Key) can reach it.
+    """
     try:
         from memory.history import get_by_id
-        loop = asyncio.get_event_loop()
-        record = await loop.run_in_executor(None, get_by_id, record_id)
+        if not user_id:
+            log.warning("GET /history/%s called without user_id — unscoped lookup", record_id)
+        record = await run_in_threadpool(get_by_id, record_id, user_id)
         if not record:
             raise HTTPException(status_code=404, detail=f"Record {record_id} not found")
         return record
@@ -470,7 +557,7 @@ async def get_cache_stats():
     """Upstash Redis cache statistics."""
     try:
         from tools.cache_tool import cache_stats
-        return cache_stats()
+        return await run_in_threadpool(cache_stats)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -529,13 +616,26 @@ async def sync_note(req: VaultSyncRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.delete("/api/v1/vault/notes/{note_id}", tags=["Phase 2: Paper Studio"])
+async def delete_note(note_id: str, user_id: str):
+    """Remove a note's vector from the vault (call after a note is deleted, or before re-sync on edit)."""
+    try:
+        from agents.note_vault_agent import delete_note_vectors
+        await delete_note_vectors(note_id=note_id, user_id=user_id)
+        return {"success": True}
+    except Exception as exc:
+        log.exception("Error deleting note vectors")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/api/v1/vault/draft-section", tags=["Phase 2: Paper Studio"])
 async def draft_section(req: DraftSectionRequest):
     """RAG-powered paper section drafter using user's saved notes."""
     try:
         from agents.note_vault_agent import search_vault_notes, draft_paper_section_with_notes
         notes = await search_vault_notes(user_id=req.user_id, query=req.section_topic, limit=4)
-        result = draft_paper_section_with_notes(
+        result = await run_in_threadpool(
+            draft_paper_section_with_notes,
             user_id=req.user_id,
             section_topic=req.section_topic,
             instructions=req.instructions,
@@ -653,12 +753,17 @@ def evaluate_defense(req: DefenseEvaluateRequest):
     """Evaluates student rebuttal and returns scores and academic verdict."""
     try:
         from agents.defense_simulator_agent import evaluate_defense_rebuttal
-        return evaluate_defense_rebuttal(
+        result = evaluate_defense_rebuttal(
             examiner_name=req.examiner_name,
             examiner_title=req.examiner_title,
             question=req.question,
             student_answer=req.student_answer,
         )
+        if result.get("error"):
+            raise HTTPException(status_code=503, detail="Evaluation unavailable, please retry")
+        return result
+    except HTTPException:
+        raise
     except Exception as exc:
         log.exception("Error evaluating defense rebuttal")
         raise HTTPException(status_code=500, detail=str(exc))

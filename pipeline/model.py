@@ -8,41 +8,43 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 log = logging.getLogger(__name__)
 
+# Model names can be overridden per deployment with MODEL_* env vars (e.g.
+# MODEL_MASTER_MISTRAL=mistral-large-latest) without a code change.
 MODEL_REGISTRY = {
     "worker-groq": {
         "provider": "groq",
-        "model": "openai/gpt-oss-120b",
+        "model": os.getenv("MODEL_WORKER_GROQ", "openai/gpt-oss-120b"),
         "temperature": 0.1,
     },
 
     "worker-gemini": {
         "provider": "google",
-        "model": "gemini-3.6-flash",
+        "model": os.getenv("MODEL_WORKER_GEMINI", "gemini-3.6-flash"),
         "temperature": 0.1,
     },
     "worker-mistral": {
         "provider": "mistral",
-        "model": "mistral-small-latest",
+        "model": os.getenv("MODEL_WORKER_MISTRAL", "mistral-small-latest"),
         "temperature": 0.1,
     },
     "worker-openrouter": {
         "provider": "openrouter",
-        "model": "meta-llama/llama-3.3-70b-instruct:free",
+        "model": os.getenv("MODEL_WORKER_OPENROUTER", "meta-llama/llama-3.3-70b-instruct:free"),
         "temperature": 0.1,
     },
     "master-mistral": {
         "provider": "mistral",
-        "model": "mistral-small-latest",
+        "model": os.getenv("MODEL_MASTER_MISTRAL", "mistral-small-latest"),
         "temperature": 0.2,
     },
     "master-gemini": {
         "provider": "google",
-        "model": "gemini-3.6-flash",
+        "model": os.getenv("MODEL_MASTER_GEMINI", "gemini-3.6-flash"),
         "temperature": 0.2,
     },
     "master-openrouter": {
         "provider": "openrouter",
-        "model": "meta-llama/llama-3.3-70b-instruct:free",
+        "model": os.getenv("MODEL_MASTER_OPENROUTER", "meta-llama/llama-3.3-70b-instruct:free"),
         "temperature": 0.2,
     },
 }

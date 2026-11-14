@@ -1,12 +1,11 @@
 
-import operator 
-from typing import Annotated
 from typing import List, TypedDict, Dict
 
 
 class ResearchState(TypedDict):
     # ── Input ──────────────────────────────────────────────────────────────
     topic: str
+    mode: str                       # "fast" | "deep" (must be declared or LangGraph drops it)
 
     # ── Planner output ─────────────────────────────────────────────────────
     plan: str                       
@@ -18,7 +17,9 @@ class ResearchState(TypedDict):
     search_topic: str               
 
     # ── Search / Scrape ────────────────────────────────────────────────────
-    search_results: Annotated[List[str], operator.add]
+    # Plain overwrite. Every node returns {**state, ...}, so an operator.add
+    # reducer appended the list to itself at each node (1 -> 64 items).
+    search_results: List[str]
     verified_urls: List[str]
     urls: List[str]
 
@@ -44,6 +45,7 @@ class ResearchState(TypedDict):
     # ── Fact-check ────────────────────────────────────────────────────────
     fact_check_result: str
     fact_check_score: float
+    fact_check_parsed: bool         # False => score is NOT a real verification result
 
     # ── Meta ──────────────────────────────────────────────────────────────
     error: str

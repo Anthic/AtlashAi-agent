@@ -3,6 +3,7 @@ import logging
 
 from typing import Dict, Any, List, Optional
 from pipeline.fallback import execute_with_fallback, CascadeExecutionResult
+from tools.safety import wrap_untrusted, build_messages
 
 log = logging.getLogger(__name__)
 
@@ -54,11 +55,11 @@ def review_paper_draft(
     """
     Executes a comprehensive 3-agent simulated peer review on a research draft.
     """
-    full_prompt = (
-        f"[SYSTEM]\n{SYSTEM_PEER_REVIEW_PROMPT}\n\n"
+    full_prompt = build_messages(
+        SYSTEM_PEER_REVIEW_PROMPT,
         f"[SUBMITTED PAPER TITLE]\n{paper_title}\n\n"
-        f"[PAPER CONTENT / DRAFT]\n{paper_content}\n\n"
-        f"[SIMULATED PEER REVIEW PANEL EVALUATION]"
+        f"[PAPER CONTENT / DRAFT]\n{wrap_untrusted(paper_content, 'paper_draft')}\n\n"
+        f"[SIMULATED PEER REVIEW PANEL EVALUATION]",
     )
 
     log.info("Running Simulated Peer-Review for paper: '%s'", paper_title)

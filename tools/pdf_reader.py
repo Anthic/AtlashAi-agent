@@ -38,6 +38,39 @@ def _arxiv_to_pdf_url(url: str) -> str:
     return url  # already a pdf url or something else
 
 
+MAX_PDF_BYTES = 15 * 1024 * 1024   # 15 MB
+_MAX_REDIRECTS = 4
+
+
+def _download_pdf(url: str) -> bytes:
+    """SSRF-guarded, redirect-validated, size-capped PDF download."""
+    from urllib.parse import urljoin
+    from tools.scraper import is_safe_url
+
+    current = url
+    for _ in range(_MAX_REDIRECTS + 1):
+        if not is_safe_url(current):
+            raise ValueError(f"URL blocked for security reasons: {current}")
+        with httpx.stream("GET", current, headers=_HEADERS, timeout=20, follow_redirects=False) as r:
+            if r.is_redirect:
+                loc = r.headers.get("location")
+                if not loc:
+                    raise ValueError("redirect without Location")
+                current = urljoin(current, loc)
+                continue
+            r.raise_for_status()
+            declared = r.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > MAX_PDF_BYTES:
+                raise ValueError(f"PDF too large ({declared} bytes)")
+            buf = bytearray()
+            for chunk in r.iter_bytes(65536):
+                buf.extend(chunk)
+                if len(buf) > MAX_PDF_BYTES:
+                    raise ValueError(f"PDF exceeded {MAX_PDF_BYTES} bytes")
+            return bytes(buf)
+    raise ValueError("too many redirects")
+
+
 def read_pdf_from_url(url: str, max_chars: int = 8000) -> str:
     """
     Download and extract text from a PDF at `url`.
@@ -53,14 +86,16 @@ def read_pdf_from_url(url: str, max_chars: int = 8000) -> str:
     log.info("PDFReader: fetching %s", pdf_url)
 
     try:
-        response = httpx.get(pdf_url, headers=_HEADERS, timeout=20, follow_redirects=True)
-        response.raise_for_status()
+        content = _download_pdf(pdf_url)
+    except ValueError as exc:
+        log.warning("PDFReader: blocked/oversized %s — %s", pdf_url, exc)
+        return f"ERROR fetching PDF: {exc}"
     except httpx.HTTPError as exc:
         log.warning("PDFReader: HTTP error for %s — %s", pdf_url, exc)
         return f"ERROR fetching PDF: {exc}"
 
     try:
-        reader = PdfReader(io.BytesIO(response.content))
+        reader = PdfReader(io.BytesIO(content))
         pages_text = []
         for page in reader.pages:
             text = page.extract_text() or ""
