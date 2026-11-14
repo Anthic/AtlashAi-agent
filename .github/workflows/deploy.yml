@@ -38,6 +38,19 @@ jobs:
         run: |
           python testing/test_pipeline.py
 
+      # Offline regression tests for the audit fixes (LLM, Redis, DB and network are mocked).
+      # Dummy keys are used on purpose: these tests must never call a real provider.
+      - name: Run Audit Regression Tests
+        env:
+          TAVILY_API_KEY: ci-dummy
+          GROQ_API_KEY: ci-dummy
+          GEMINI_API_KEY: ci-dummy
+          MISTRALAI_API_KEY: ci-dummy
+          OPENROUTER_API_KEY: ci-dummy
+          INTERNAL_API_KEY: ci-test-secret
+        run: |
+          python -m pytest testing/test_audit_fixes.py -q -p no:cacheprovider
+
 
   deploy:
     name: Deploy to AWS EC2

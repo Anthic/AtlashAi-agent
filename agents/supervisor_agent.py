@@ -23,8 +23,13 @@ import re
 from typing import Optional
 
 from pipeline.fallback import execute_with_fallback
+from pipeline.chains import format_numbered_sources
 
 log = logging.getLogger(__name__)
+
+REVIEW_MAX_CHARS = 12000
+FIX_MAX_CHARS = 12000
+REVIEW_TIMEOUT_SEC = 15
 
 # ── Supervisor Prompt ─────────────────────────────────────────────────────────
 
@@ -157,13 +162,13 @@ def run_supervisor_review(
             fix_applied=False,
         )
 
-    url_text = "\n".join(f"- {u}" for u in verified_urls) if verified_urls else "- None provided"
+    url_text = format_numbered_sources(verified_urls)
 
     # ── Step 1: Mistral Large reviews (ONCE) ─────────────────────────────────
     review_prompt = _SUPERVISOR_REVIEW_PROMPT.format(
         topic=topic,
         verified_urls=url_text,
-        report=report[:6000],  # cap to avoid token overflow on very long reports
+        report=report[:REVIEW_MAX_CHARS],
     )
 
     try:
@@ -171,7 +176,7 @@ def run_supervisor_review(
         review_res = execute_with_fallback(
             review_prompt,
             tier="master",            # Mistral Large (or Gemini Flash fallback)
-            call_timeout_sec=8,       # 8s: EC2 Mistral=3-5s ✓, local timeout→Gemini fallback
+            call_timeout_sec=REVIEW_TIMEOUT_SEC,
         )
         parsed = _parse_supervisor_response(review_res.content)
         log.info(
@@ -180,11 +185,12 @@ def run_supervisor_review(
             parsed["score"],
         )
     except Exception as exc:
-        log.warning("Supervisor review failed: %s — returning original draft", exc)
+        # Never report a review that did not happen as "approved 7/10".
+        log.warning("Supervisor review unavailable: %s — returning original draft UNREVIEWED", exc)
         return SupervisorResult(
             final_report=report,
-            approved_on_first_try=True,   # assume ok, don't block
-            supervisor_score=7,
+            approved_on_first_try=False,
+            supervisor_score=0,
             fix_applied=False,
         )
 
@@ -207,7 +213,7 @@ def run_supervisor_review(
     fix_prompt = _WORKER_FIX_PROMPT.format(
         topic=topic,
         verified_urls=url_text,
-        original_report=report[:5000],
+        original_report=report[:FIX_MAX_CHARS],
         fix_instructions=parsed["fix_instructions"],
     )
 
@@ -218,6 +224,11 @@ def run_supervisor_review(
             call_timeout_sec=20,
         )
         fixed_report = fix_res.content.strip()
+        # Guard: if the fix pass came back far shorter than the original it dropped content
+        if fixed_report and len(fixed_report) < 0.7 * len(report):
+            log.warning("Worker fix shortened the report (%d -> %d chars); keeping original",
+                        len(report), len(fixed_report))
+            fixed_report = ""
         log.info(
             "Worker fix complete via [%s] (%d chars → %d chars)",
             fix_res.provider_used,

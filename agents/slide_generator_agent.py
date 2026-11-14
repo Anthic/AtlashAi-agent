@@ -3,6 +3,7 @@ import logging
 from typing import List, Optional
 
 from pipeline.fallback import execute_with_fallback, CascadeExecutionResult
+from tools.safety import wrap_untrusted, build_messages
 
 log = logging.getLogger(__name__)
 
@@ -50,14 +51,16 @@ def generate_slide_deck(
     """
     Generates a Marp-compliant slide deck in sub-3 seconds using Fast Worker Cascade.
     """
-    context_text = f"\n[SOURCE PAPER CONTENT / NOTES]\n{content}\n" if content else ""
+    context_text = (
+        f"\n[SOURCE PAPER CONTENT / NOTES]\n{wrap_untrusted(content, 'source_paper')}\n" if content else ""
+    )
 
-    full_prompt = (
-        f"[SYSTEM]\n{SYSTEM_SLIDE_PROMPT}\n\n"
+    full_prompt = build_messages(
+        SYSTEM_SLIDE_PROMPT,
         f"[TARGET PRESENTATION TOPIC / TITLE]\n{title_or_topic}\n"
         f"{context_text}\n"
         f"[DESIRED SLIDE COUNT]: {num_slides} slides\n\n"
-        f"[GENERATED MARP SLIDE DECK]"
+        f"[GENERATED MARP SLIDE DECK]",
     )
 
     log.info("Generating Academic Slide Deck for: '%s'", title_or_topic)

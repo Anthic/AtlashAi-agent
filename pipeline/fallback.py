@@ -74,6 +74,37 @@ def _mark_cooldown(model_key: str) -> None:
         _cooldown_until[model_key] = time.time() + COOLDOWN_SEC
 
 
+def _is_timeout(exc: BaseException) -> bool:
+    return isinstance(exc, TimeoutError) or "timed out" in str(exc).lower() or "timeout" in str(exc).lower()
+
+
+def invoke_with_cascade(llm, prompt: Any, tier: str = "worker", timeout_sec: float = 45) -> str:
+    """
+    Call a single LLM with a hard timeout; on ANY failure fall back to the full
+    provider cascade. Returns plain text. Used by stages (summarizer, fact-check,
+    knowledge graph) that were previously pinned to one provider.
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm-single")
+    try:
+        fut = pool.submit(llm.invoke, prompt)
+        try:
+            res = fut.result(timeout=timeout_sec)
+            content = res.content if hasattr(res, "content") else str(res)
+            if isinstance(content, list):
+                content = "".join(p.get("text", str(p)) if isinstance(p, dict) else str(p) for p in content)
+            if content and str(content).strip():
+                return str(content)
+            raise ValueError("empty LLM response")
+        except FuturesTimeout:
+            raise TimeoutError(f"single-provider call timed out after {timeout_sec}s")
+    except Exception as exc:
+        log.warning("Single-provider call failed (%s) — using fallback cascade", exc)
+        return execute_with_fallback(prompt, tier=tier).content
+    finally:
+        pool.shutdown(wait=False)
+
+
 def _extract_token_usage(response: Any) -> Dict[str, int]:
     """
     Provider-agnostic token usage extraction.
@@ -206,7 +237,13 @@ def execute_with_fallback(
                 "Provider [%s] failed: %s. Initiating failover...",
                 model_key, exc, exc_info=True,
             )
-            _mark_cooldown(model_key)
+            # A slow response says nothing about provider health: don't put a
+            # healthy provider on cooldown (it also starves other callers such as
+            # the deep-mode writer). Cool down only on real errors (429/401/5xx...).
+            if _is_timeout(exc):
+                log.info("Provider [%s] timed out — no cooldown applied.", model_key)
+            else:
+                _mark_cooldown(model_key)
             errors.append(f"{model_key}: {exc}")
 
             try:

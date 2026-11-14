@@ -70,11 +70,15 @@ def run_reader_agent(state: dict, _reader) -> dict:
 
         blocks = []
         success_count = 0
+        all_urls = state.get("verified_urls", []) or []
         for url in urls:
             content = results_by_url.get(url, "")
             if content and not content.startswith("ERROR"):
+                # [Source N] must equal the 1-based position in verified_urls,
+                # because the frontend links [Source N] to verified_urls[N-1].
+                n = all_urls.index(url) + 1 if url in all_urls else len(blocks) + 1
                 # Cap per-URL content to avoid writer token overflow
-                blocks.append(f"Source: {url}\n{content[:MAX_CHARS_PER_URL]}")
+                blocks.append(f"[Source {n}] {url}\n{content[:MAX_CHARS_PER_URL]}")
                 success_count += 1
             else:
                 log.warning("Reader: failed to scrape %s — %s", url, content[:100] if content else "empty")

@@ -28,3 +28,6 @@ test_api.py
 # OS
 .DS_Store
 Thumbs.db
+
+# Keys / certificates — NEVER commit
+*.pem

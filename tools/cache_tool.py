@@ -59,13 +59,35 @@ def _redis_command(*args) -> Any:
         return None
 
 
-def _cache_set(key: str, value: Any, ttl: int = _DEFAULT_TTL) -> None:
-    """Store a JSON-serialised value with TTL in seconds."""
+def _cache_set(key: str, value: Any, ttl: int = _DEFAULT_TTL) -> bool:
+    """Store a JSON-serialised value with TTL in seconds. Returns True if stored."""
     try:
         serialised = json.dumps(value)
-        _redis_command("SET", key, serialised, "EX", ttl)
+        return _redis_command("SET", key, serialised, "EX", ttl) is not None
     except Exception as exc:
         log.warning("Cache: SET failed — %s", exc)
+        return False
+
+
+def _is_cacheable(result: Any) -> bool:
+    """Never cache failures / empty results — a transient error would otherwise
+    poison the key for the whole TTL for every user."""
+    if result is None:
+        return False
+    if isinstance(result, str):
+        return len(result) >= 80 and not result.startswith(("ERROR", "Search failed"))
+    if isinstance(result, dict):
+        if result.get("error") or result.get("__cached_none__"):
+            return False
+        res = result.get("results", result.get("hits"))
+        if isinstance(res, dict):          # You.com: {"results": {"web": [...]}}
+            return any(res.values())
+        if res is not None:
+            return bool(res)
+        return bool(result)
+    if isinstance(result, (list, tuple)):
+        return len(result) > 0
+    return True
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -118,16 +140,17 @@ def cached_search(
 
     log.info("Cache: MISS for %r — running search", topic)
     result = search_fn(topic)
-    
-    # Cache even if result is None (using sentinel)
-    to_store = _CACHED_NONE if result is None else result
-    _cache_set(key, to_store, ttl=ttl)
+
+    if _is_cacheable(result):
+        _cache_set(key, result, ttl=ttl)
+    else:
+        log.info("Cache: not caching empty/failed result for %r", topic)
     return result
 
 
-def cache_put(key: str, value: Any, ttl: int = _DEFAULT_TTL) -> None:
-    """Manually store any JSON-serialisable value."""
-    _cache_set(key, value, ttl=ttl)
+def cache_put(key: str, value: Any, ttl: int = _DEFAULT_TTL) -> bool:
+    """Manually store any JSON-serialisable value. Returns False if Redis did not store it."""
+    return _cache_set(key, value, ttl=ttl)
 
 
 def cache_get(key: str, default: Any = None) -> Any:

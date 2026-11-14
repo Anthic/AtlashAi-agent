@@ -53,6 +53,9 @@ def _make_initial_state(topic: str , mode : str = "deep") -> dict:
         # Fact-check
         "fact_check_result": "",
         "fact_check_score": 0.0,
+        "fact_check_parsed": False,
+        "knowledge_graph": {},
+        "knowledge_graph_md": "",
         # Meta
         "error": "",
     }
@@ -91,7 +94,10 @@ def stream_research(topic: str, job_id: str | None = None, mode: str = "deep") -
             "critique": final_state.get("critique", ""),
             "critique_score": final_state.get("critique_score", 0),
             "fact_check_score": final_state.get("fact_check_score") or 0.0,
+            "fact_check_parsed": bool(final_state.get("fact_check_parsed", False)),
             "fact_check_result": final_state.get("fact_check_result", ""),
+            "knowledge_graph": final_state.get("knowledge_graph") or {},
+            "knowledge_graph_md": final_state.get("knowledge_graph_md", ""),
             "rewritten_queries": final_state.get("rewritten_queries", []),
             "verified_urls": final_state.get("verified_urls", []),
             "error": final_state.get("error", ""),

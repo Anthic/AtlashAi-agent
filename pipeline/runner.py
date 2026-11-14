@@ -10,9 +10,7 @@ from typing import List
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
  
-from agents.search_agent import build_search_agent, run_search_agent
 from agents.reader_agent import build_reader_agent, run_reader_agent
-from agents.query_rewrite_agent import run_query_rewrite_node
 from agents.summarizer_agent import run_summarizer_node
 from agents.fact_check_agent import run_fact_check_node
 from agents.planner_agent import run_planner_node
@@ -88,7 +86,6 @@ def bump_retry(state: ResearchState) -> ResearchState:
  
 def run_critic_node(state: dict) -> dict:
     """Run critic and parse numeric score into state."""
-    full_report = state.get("report", "")
     updated = run_critic(state)
     updated["critique_score"] = parse_score(updated.get("critique", ""))
     return updated
@@ -123,7 +120,7 @@ def build_pipeline(mode: str = "deep"):
     fast_llm  = get_llm("fast")
     smart_llm = get_llm("smart")
  
-    search_agent  = build_search_agent(fast_llm)
+    search_agent  = None   # legacy ReAct search agent is no longer built (searcher calls Tavily directly)
     reader_agent  = build_reader_agent()
  
     graph = StateGraph(ResearchState)

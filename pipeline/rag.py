@@ -1,16 +1,31 @@
 # Migrated: Mistral Embeddings -> FastEmbed (BAAI/bge-small-en-v1.5)
+"""
+pipeline/rag.py
+Per-run retrieval over the scraped sources.
+
+Fixes vs. the previous version (AI-9):
+  * Chunks are keyed by a hash of (topic + content), NOT the raw topic, so an
+    existing topic never causes new content to be skipped and old/other-user
+    chunks are never returned.
+  * Indexes the RAW scraped pages (summarised text carries little extra signal).
+  * One shared sync Qdrant client; collection/index setup runs once per process
+    instead of 3 extra calls on every job.
+  * Old chunks expire (RAG_TTL_DAYS) so the shared collection does not grow forever.
+"""
 
 import hashlib
 import logging
 import os
-import asyncio
-from typing import Dict, List
+import threading
+import time
+from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from fastembed import TextEmbedding
-from qdrant_client import AsyncQdrantClient
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qm
 from qdrant_client.models import VectorParams, Distance
 
 load_dotenv()
@@ -24,6 +39,8 @@ QDRANT_API_KEY  = os.getenv("QDRANT_API_KEY", "")
 MODEL_NAME      = "BAAI/bge-small-en-v1.5"
 VECTOR_SIZE     = 384
 COLLECTION_NAME = "research_bge_v1"
+RAG_TTL_DAYS    = int(os.getenv("RAG_TTL_DAYS", "7"))
+MAX_RAG_CHARS   = 40000
 
 # ── Model Singleton ────────────────────────────────────────────────────────────
 
@@ -35,61 +52,68 @@ except Exception as e:
     log.error("Failed to load FastEmbed model: %s", e)
     _embeddings_model = None
 
+# ── Shared client + one-time setup ─────────────────────────────────────────────
 
-# ── Collection Startup Check ──────────────────────────────────────────────────
+_client: Optional[QdrantClient] = None
+_client_lock = threading.Lock()
+_ready = False
+_last_cleanup = 0.0
 
-async def _async_init_collection(client: AsyncQdrantClient = None):
-    """Ensure the Qdrant collection and payload indexes exist."""
-    if not QDRANT_URL or not QDRANT_API_KEY:
-        log.warning("RAG: QDRANT_URL or QDRANT_API_KEY not configured. Startup collection check skipped.")
+
+def _get_client() -> QdrantClient:
+    global _client
+    if _client is None:
+        with _client_lock:
+            if _client is None:
+                if not QDRANT_URL or not QDRANT_API_KEY:
+                    raise EnvironmentError("QDRANT_URL and QDRANT_API_KEY must be set in .env")
+                _client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, timeout=15)
+    return _client
+
+
+def _ensure_ready(client: QdrantClient) -> None:
+    """Create the collection + payload indexes once per process."""
+    global _ready
+    if _ready:
         return
-
-    should_close = False
-    if client is None:
-        client = AsyncQdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-        should_close = True
-
-    try:
-        exists = await client.collection_exists(collection_name=COLLECTION_NAME)
-        if not exists:
-            await client.create_collection(
+    with _client_lock:
+        if _ready:
+            return
+        if not client.collection_exists(COLLECTION_NAME):
+            client.create_collection(
                 collection_name=COLLECTION_NAME,
-                vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE)
+                vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
             )
-            log.info("RAG: Created Qdrant collection '%s' with size=%d", COLLECTION_NAME, VECTOR_SIZE)
-        else:
-            log.info("RAG: Qdrant collection '%s' already exists", COLLECTION_NAME)
-
-        # Create payload index for topic metadata (strict requirement in Qdrant for filtering)
-        try:
-            from qdrant_client.http import models as qdrant_models
-            await client.create_payload_index(
-                collection_name=COLLECTION_NAME,
-                field_name="metadata.topic",
-                field_schema=qdrant_models.PayloadSchemaType.KEYWORD
-            )
-            log.info("RAG: Verified payload index for 'metadata.topic' exists")
-        except Exception as e:
-            log.warning("RAG: Could not ensure payload index for 'metadata.topic': %s", e)
-
-    except Exception as e:
-        log.error("RAG startup check failed for collection '%s': %s", COLLECTION_NAME, e)
-    finally:
-        if should_close:
-            await client.close()
+            log.info("RAG: Created Qdrant collection '%s'", COLLECTION_NAME)
+        for field, schema in (
+            ("metadata.run_key", qm.PayloadSchemaType.KEYWORD),
+            ("metadata.created_at", qm.PayloadSchemaType.INTEGER),
+        ):
+            try:
+                client.create_payload_index(COLLECTION_NAME, field_name=field, field_schema=schema)
+            except Exception as e:
+                log.debug("RAG: payload index %s: %s", field, e)
+        _ready = True
 
 
-# Run startup check in a non-blocking background thread
-def _start_init_thread():
+def _cleanup_old(client: QdrantClient) -> None:
+    """Best-effort: drop chunks older than RAG_TTL_DAYS (and legacy chunks with no timestamp). Hourly at most."""
+    global _last_cleanup
+    now = time.time()
+    if now - _last_cleanup < 3600:
+        return
+    _last_cleanup = now
     try:
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(_async_init_collection())
-        loop.close()
+        cutoff = int(now - RAG_TTL_DAYS * 86400)
+        client.delete(
+            collection_name=COLLECTION_NAME,
+            points_selector=qm.FilterSelector(filter=qm.Filter(should=[
+                qm.FieldCondition(key="metadata.created_at", range=qm.Range(lt=cutoff)),
+                qm.IsEmptyCondition(is_empty=qm.PayloadField(key="metadata.created_at")),
+            ])),
+        )
     except Exception as e:
-        log.warning("RAG: Failed to complete startup collection initialization: %s", e)
-
-import threading
-threading.Thread(target=_start_init_thread, daemon=True).start()
+        log.debug("RAG: cleanup skipped: %s", e)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -100,16 +124,32 @@ def _chunk_text(raw_text: str) -> List[Document]:
     return splitter.create_documents([raw_text])
 
 
-# ── Async RAG Execution ────────────────────────────────────────────────────────
+def run_key_for(topic: str, content: str) -> str:
+    """Isolation key: same topic + same content => same key (idempotent re-ingest);
+    different content or topic => different key (nothing stale or shared leaks in)."""
+    h = hashlib.sha256()
+    h.update(topic.lower().strip().encode("utf-8"))
+    h.update(b"\x00")
+    h.update(content.encode("utf-8"))
+    return h.hexdigest()[:32]
 
-async def _async_run_rag(state: Dict) -> Dict:
+
+def _embed(texts: List[str]) -> List[List[float]]:
+    if not _embeddings_model:
+        raise ValueError("FastEmbed model is not initialized.")
+    return [[float(x) for x in v] for v in _embeddings_model.embed(texts)]
+
+
+# ── RAG execution ──────────────────────────────────────────────────────────────
+
+def _run_rag(state: Dict) -> Dict:
     topic = state.get("topic", "").strip()
 
-    # Prefer summarized content (less noise)
+    # Prefer the RAW scraped pages: retrieval over already-summarised text adds little.
     raw_text = (
-        state.get("summarized_content", "").strip()
-        or state.get("scraped_content", "").strip()
-    )
+        state.get("scraped_content", "").strip()
+        or state.get("summarized_content", "").strip()
+    )[:MAX_RAG_CHARS]
 
     if not raw_text:
         return {
@@ -119,107 +159,54 @@ async def _async_run_rag(state: Dict) -> Dict:
         }
 
     try:
-        if not QDRANT_URL or not QDRANT_API_KEY:
-            raise EnvironmentError("QDRANT_URL and QDRANT_API_KEY must be set in .env")
+        client = _get_client()
+        _ensure_ready(client)
+        _cleanup_old(client)
 
-        async_client = AsyncQdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-        
-        # Guarantee that the collection and payload indexes exist before performing any operations
-        await _async_init_collection(async_client)
-        
-        # Check if topic already exists in COLLECTION_NAME to avoid duplicate ingestion
-        from qdrant_client.http import models as qdrant_models
-        
-        filter_topic = qdrant_models.Filter(
-            must=[
-                qdrant_models.FieldCondition(
-                    key="metadata.topic",
-                    match=qdrant_models.MatchValue(value=topic)
-                )
-            ]
-        )
-        
-        # Check if vectors already ingested for this topic
-        is_new = True
+        run_key = run_key_for(topic, raw_text)
+        run_filter = qm.Filter(must=[
+            qm.FieldCondition(key="metadata.run_key", match=qm.MatchValue(value=run_key))
+        ])
+
         try:
-            count_res = await async_client.count(
-                collection_name=COLLECTION_NAME,
-                count_filter=filter_topic
-            )
-            is_new = count_res.count == 0
+            already = client.count(COLLECTION_NAME, count_filter=run_filter, exact=False).count > 0
         except Exception:
-            is_new = True
+            already = False
 
-        chunks = _chunk_text(raw_text)
-        chunk_texts = [c.page_content for c in chunks]
-
-        loop = asyncio.get_event_loop()
-
-        async def embed_chunks_task(texts):
-            if not _embeddings_model:
-                raise ValueError("FastEmbed model is not initialized.")
-            # fastembed is CPU-bound, run in executor to prevent blocking the event loop
-            return await loop.run_in_executor(None, lambda: [list(v) for v in _embeddings_model.embed(texts)])
-
-        async def embed_query_task(q_text):
-            if not _embeddings_model:
-                raise ValueError("FastEmbed model is not initialized.")
-            # fastembed is CPU-bound, run in executor to prevent blocking the event loop
-            return await loop.run_in_executor(None, lambda: list(next(_embeddings_model.embed([q_text]))))
-
-        # Parallel gather embedding & query embedding
-        if is_new and chunk_texts:
-            chunk_embeddings, query_vector = await asyncio.gather(
-                embed_chunks_task(chunk_texts),
-                embed_query_task(topic)
-            )
-            
-            # Prepare points for ingestion
-            points = [
-                qdrant_models.PointStruct(
-                    id=hashlib.md5(f"{topic}-{i}-{chunk[:20]}".encode()).hexdigest(),
-                    vector=emb,
-                    payload={"page_content": chunk, "metadata": {"topic": topic}}
-                )
-                for i, (chunk, emb) in enumerate(zip(chunk_texts, chunk_embeddings))
-            ]
-            
-            try:
-                await async_client.upsert(
-                    collection_name=COLLECTION_NAME,
-                    points=points
-                )
-                log.info("RAG: ingested %d chunks into '%s'", len(points), COLLECTION_NAME)
-            except Exception as e:
-                log.error("RAG: failed to upsert points: %s", e)
+        if not already:
+            chunk_texts = [c.page_content for c in _chunk_text(raw_text)]
+            if chunk_texts:
+                embeddings = _embed(chunk_texts)
+                created = int(time.time())
+                points = [
+                    qm.PointStruct(
+                        id=hashlib.md5(f"{run_key}-{i}".encode()).hexdigest(),
+                        vector=emb,
+                        payload={
+                            "page_content": chunk,
+                            "metadata": {"topic": topic, "run_key": run_key, "created_at": created},
+                        },
+                    )
+                    for i, (chunk, emb) in enumerate(zip(chunk_texts, embeddings))
+                ]
+                client.upsert(collection_name=COLLECTION_NAME, points=points)
+                log.info("RAG: ingested %d chunks (run_key=%s)", len(points), run_key[:8])
         else:
-            log.info("RAG: collection '%s' already has data for topic=%r, skipping ingest", COLLECTION_NAME, topic)
-            query_vector = await embed_query_task(topic)
+            log.info("RAG: content already indexed (run_key=%s), skipping ingest", run_key[:8])
 
-        # Similarity search
-        docs = []
-        try:
-            search_res = await async_client.query_points(
-                collection_name=COLLECTION_NAME,
-                query=query_vector,
-                query_filter=filter_topic,
-                limit=4
-            )
-            docs = search_res.points
-        except Exception as e:
-            log.error("RAG: similarity search failed: %s", e)
-
-        await async_client.close()
+        query_vector = _embed([topic])[0]
+        docs = client.query_points(
+            collection_name=COLLECTION_NAME,
+            query=query_vector,
+            query_filter=run_filter,
+            limit=4,
+        ).points
 
         rag_context = "\n\n".join(
             f"[Chunk {i+1}]: {doc.payload.get('page_content', '')}"
             for i, doc in enumerate(docs)
         )
-
-        log.info(
-            "RAG: retrieved %d chunks (%d chars) for topic=%r",
-            len(docs), len(rag_context), topic,
-        )
+        log.info("RAG: retrieved %d chunks (%d chars) for topic=%r", len(docs), len(rag_context), topic)
         return {**state, "rag_context": rag_context}
 
     except Exception as exc:
@@ -227,15 +214,10 @@ async def _async_run_rag(state: Dict) -> Dict:
         return {**state, "rag_context": "", "error": f"RAG failed: {exc}"}
 
 
-# ── Main Node Signature (Synchronous wrapper) ───────────────────────────
-# ── Main Node Signature (Synchronous wrapper) ───────────────────────────
-
 def run_rag_node(state: Dict) -> Dict:
     """
-    LangGraph node — embeds scraped content into Qdrant and retrieves
-    the most relevant chunks for the current topic.
-
-    Uses BAAI/bge-small-en-v1.5 locally via fastembed and gathers
-    chunk + query embedding in parallel.
+    LangGraph node — embeds the scraped content into Qdrant (keyed per run) and
+    retrieves the most relevant chunks for the current topic. Synchronous: it runs
+    in a worker thread, so no event loop is created per job.
     """
-    return asyncio.run(_async_run_rag(state))
+    return _run_rag(state)

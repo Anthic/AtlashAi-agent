@@ -1,5 +1,6 @@
 import logging
 from pipeline.fallback import execute_with_fallback, CascadeExecutionResult
+from tools.safety import wrap_untrusted, build_messages
 
 
 log = logging.getLogger(__name__)
@@ -65,10 +66,9 @@ def paraphrase(
             f"Invalid mode '{mode}'. Choose from: {list(SYSTEM_PROMPTS.keys())}"
         )
     system_prompt = SYSTEM_PROMPTS[mode]
-    full_prompt = (
-        f"[SYSTEM]\n{system_prompt}\n\n"
-        f"[TEXT TO PARAPHRASE]\n{text}\n\n"
-        f"[OUTPUT]"
+    full_prompt = build_messages(
+        system_prompt,
+        f"[TEXT TO PARAPHRASE]\n{wrap_untrusted(text, 'user_text')}\n\n[OUTPUT]",
     )
     log.info("Paraphraser called | mode=%s | chars=%d", mode, len(text))
     result = execute_with_fallback(
